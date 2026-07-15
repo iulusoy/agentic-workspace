@@ -42,6 +42,18 @@ ANTHROPIC_API_KEY=sk-... python src/backend/client_loop.py
 ANTHROPIC_API_KEY=dummy ANTHROPIC_BASE_URL=http://localhost:4000 python src/backend/client_loop.py
 ```
 
+### Using docker-compose
+
+Build the image locally using
+```bash
+docker build --no-cache -q -t biocypher-agent-test .
+```
+Place your Anthropic API key inside `secrets/anthropic_api_key`. Then start the service using
+```bash
+ docker compose run --rm agent
+```
+This setup is fairly safe for local single-user use. Any `run_command` runs inside the container as a non-root agent user at `/workspace` and the host filesystem is untouchable. The root filesystem is read-only, and there are pids/mem/cpu limits. The API key is read once at startup and then removed from the environment.
+
 ### Env vars
 
 - `ANTHROPIC_API_KEY` — required (any non-empty value for local models)
