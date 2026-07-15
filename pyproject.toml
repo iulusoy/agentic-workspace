@@ -36,3 +36,6 @@ documentation = "https://ssciwr.github.io/AMMICO/build/html/index.html"
 
 [tool.setuptools]
 packages = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
