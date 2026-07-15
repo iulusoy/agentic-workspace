@@ -1,0 +1,16 @@
+.git
+.venv
+.vscode
+__pycache__
+*.egg-info
+adapter
+adapter2
+tests
+dist
+build
+secrets
+PLAN.md
+deployment.md
+docker-compose.yml
+Dockerfile
+.dockerignore

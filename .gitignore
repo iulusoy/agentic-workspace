@@ -209,3 +209,6 @@ __marimo__/
 # adapters
 adapter/
 adapter2/
+
+# Docker secrets (local only, never commit)
+secrets/
