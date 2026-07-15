@@ -12,14 +12,27 @@ The LLM provider is swappable via base URL:
 
 Env vars:
 - ANTHROPIC_API_KEY          (required; any non-empty value for local models)
+- ANTHROPIC_API_KEY_FILE     (alternative to ANTHROPIC_API_KEY: path to a file
+                              holding the key; read once at startup and deleted
+                              best-effort so the key never sits in the process
+                              environment — preferred when a per-session
+                              container is handed a user-supplied key)
+- ANTHROPIC_AUTH_TOKEN       (optional bearer-token alternative to
+                              ANTHROPIC_API_KEY, e.g. for gateways; _FILE
+                              variant supported like ANTHROPIC_API_KEY_FILE)
 - ANTHROPIC_BASE_URL         (optional, e.g. http://localhost:4000 for LiteLLM)
 - CLAUDE_MODEL               (default: claude-opus-4-8)
 - BIOCYPHER_MCP_URL          (default: https://mcp.biocypher.org/mcp)
 - BIOCYPHER_MCP_AUTH_HEADER  (optional, e.g. "Bearer <token>")
+- BIOCYPHER_MCP_AUTH_HEADER_FILE (file variant, same semantics as
+                              ANTHROPIC_API_KEY_FILE)
 - MCP_RESULT_MAX_CHARS       (default: 20000 — cap on tool-result chars that
                               reach model context; rest stays local)
 - FILE_TOOLS_ROOT            (default: cwd — root dir the read/write/edit
                               file tools are confined to)
+
+Secrets are additionally stripped from the environment passed to run_command
+subprocesses, so model-generated shell commands never inherit them.
 
 Run:
     python src/backend/client_loop.py               # interactive chat
@@ -81,8 +94,49 @@ def thinking_config() -> dict | None:
     return None
 
 
+# Env vars holding secrets; never passed on to run_command subprocesses.
+SECRET_ENV_VARS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "BIOCYPHER_MCP_AUTH_HEADER",
+)
+
+
+def read_secret(name: str) -> str | None:
+    """Fetch a secret from <name>_FILE (preferred) or the <name> env var.
+
+    The file variant is meant for per-session containers handed a
+    user-supplied key: the orchestrator mounts the secret on a tmpfs, we read
+    it once and delete it best-effort, so the secret never appears in this
+    process's environment (/proc/*/environ) nor on disk afterwards. The env
+    var fallback also scrubs os.environ so child processes can't inherit it.
+    """
+    # Scrub both variants unconditionally: a leftover <name> in os.environ
+    # would leak the secret itself to child processes, and a leftover
+    # <name>_FILE would point them at the secret file (which survives when
+    # the unlink below fails, e.g. on a read-only secret mount).
+    env_secret = os.environ.pop(name, None)
+    path = os.environ.pop(f"{name}_FILE", None)
+    if path:
+        try:
+            secret = Path(path).read_text().strip()
+        except OSError as exc:
+            print(
+                f"[warn] could not read {name}_FILE ({exc}); "
+                f"falling back to {name} env var",
+                file=sys.stderr,
+            )
+            return env_secret or None
+        try:
+            Path(path).unlink()
+        except OSError:
+            pass
+        return secret or None
+    return env_secret or None
+
+
 def mcp_headers() -> dict[str, str]:
-    auth = os.getenv("BIOCYPHER_MCP_AUTH_HEADER")
+    auth = read_secret("BIOCYPHER_MCP_AUTH_HEADER")
     return {"Authorization": auth} if auth else {}
 
 
@@ -256,7 +310,16 @@ EXEC_BIN: Path | None = None
 
 
 def _exec_env() -> dict[str, str]:
+    """Environment for run_command subprocesses, with secrets removed.
+
+    Secrets are already scrubbed from os.environ by read_secret at startup;
+    this strips them again (plus the _FILE path variants) in case anything
+    re-added them, so model-generated commands never see credentials.
+    """
     env = os.environ.copy()
+    for var in SECRET_ENV_VARS:
+        env.pop(var, None)
+        env.pop(f"{var}_FILE", None)
     if EXEC_BIN is not None:
         env["PATH"] = f"{EXEC_BIN}{os.pathsep}{env.get('PATH', '')}"
     return env
@@ -359,8 +422,10 @@ async def select_exec_env(prompt: PromptSession) -> None:
     print(f"run_command environment: {EXEC_BIN}{marker}")
 
 
-async def chat(tools) -> None:
-    client = AsyncAnthropic()  # honors ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL
+async def chat(tools, api_key: str | None, auth_token: str | None) -> None:
+    # honors ANTHROPIC_BASE_URL; auth_token is passed explicitly because
+    # read_secret scrubbed it from the environment the SDK would read it from
+    client = AsyncAnthropic(api_key=api_key, auth_token=auth_token)
     history: list[dict] = []
     thinking = thinking_config()
     # prompt_toolkit: async input keeps the event loop (and the MCP HTTP
@@ -427,10 +492,15 @@ async def chat(tools) -> None:
 
 
 async def main() -> None:
-    if "--list-tools" not in sys.argv and not os.getenv("ANTHROPIC_API_KEY"):
+    # Read (and thereby scrub from os.environ) every secret we know about,
+    # whether or not this run uses it — see SECRET_ENV_VARS.
+    api_key = read_secret("ANTHROPIC_API_KEY")
+    auth_token = read_secret("ANTHROPIC_AUTH_TOKEN")
+    if "--list-tools" not in sys.argv and not api_key and not auth_token:
         sys.exit(
-            "ANTHROPIC_API_KEY is not set. Set it to your Anthropic key, or to any "
-            "non-empty value together with ANTHROPIC_BASE_URL for a local model."
+            "ANTHROPIC_API_KEY (or ANTHROPIC_API_KEY_FILE) is not set. Set it to "
+            "your Anthropic key, or to any non-empty value together with "
+            "ANTHROPIC_BASE_URL for a local model."
         )
     async with streamablehttp_client(MCP_URL, headers=mcp_headers()) as (
         read,
@@ -449,7 +519,7 @@ async def main() -> None:
                     )
                 return
 
-            await chat(tools)
+            await chat(tools, api_key, auth_token)
 
 
 if __name__ == "__main__":

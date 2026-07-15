@@ -1,0 +1,74 @@
+# BioCypher Agentic Workspace - standalone agent container
+#
+# Draft of the "sibling container" layout from deployment.md, self-contained
+# so it can later be merged into the registry's compose stack (add the
+# `agent` service, `agent-network`, and the volume/secret definitions there;
+# attach the registry backend to agent-network only if the agent must reach
+# an MCP endpoint inside the stack).
+#
+# Usage:
+#   mkdir -p secrets && printf '%s' "$ANTHROPIC_API_KEY" > secrets/anthropic_api_key
+#   docker compose build     # add --network=host if PyPI DNS fails in the build
+#   docker compose run --rm agent                      # interactive chat
+#   docker compose run --rm agent /app/.venv/bin/python \
+#       -m backend.client_loop --list-tools            # MCP smoke test
+#
+# `docker compose run` (not `up`) because client_loop is an interactive CLI;
+# the public multi-user deployment replaces this with per-session containers
+# spawned by an orchestrator (see deployment.md).
+
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: biocypher-agent
+    stdin_open: true
+    tty: true
+    environment:
+      FILE_TOOLS_ROOT: /workspace
+      BIOCYPHER_MCP_URL: ${BIOCYPHER_MCP_URL:-https://mcp.biocypher.org/mcp}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-opus-4-8}
+      # client_loop reads the key from this file once at startup; the key
+      # never enters the container environment. Deletion of the file is
+      # best-effort and silently skipped on the read-only secret mount.
+      ANTHROPIC_API_KEY_FILE: /run/secrets/anthropic_api_key
+    secrets:
+      - anthropic_api_key
+    volumes:
+      # Blast radius of model-generated commands: this volume only.
+      - agent-workspace:/workspace
+    networks:
+      - agent-network
+    # ---- hardening (deployment.md, "Sibling container") ----
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2
+    # Note: read_only blocks pip installs into the image venv (/app/.venv).
+    # For cookiecutter-style workflows, have the agent create a venv inside
+    # /workspace (e.g. `python -m venv /workspace/venv`) and select it at the
+    # startup environment prompt.
+    #
+    # For public multi-tenant deployments, additionally pin the runtime to
+    # gVisor on hosts where it is installed:
+    #   runtime: runsc
+
+secrets:
+  anthropic_api_key:
+    # Gitignored; one key per deployment. The BYOK flow replaces this with a
+    # per-session tmpfs mount created by the orchestrator.
+    file: ./secrets/anthropic_api_key
+
+volumes:
+  agent-workspace:
+
+networks:
+  agent-network:
+    driver: bridge

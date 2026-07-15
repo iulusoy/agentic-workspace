@@ -40,9 +40,60 @@ def test_thinking_config_explicit_override(monkeypatch):
 
 def test_mcp_headers(monkeypatch, cl):
     monkeypatch.delenv("BIOCYPHER_MCP_AUTH_HEADER", raising=False)
+    monkeypatch.delenv("BIOCYPHER_MCP_AUTH_HEADER_FILE", raising=False)
     assert cl.mcp_headers() == {}
     monkeypatch.setenv("BIOCYPHER_MCP_AUTH_HEADER", "Bearer abc")
     assert cl.mcp_headers() == {"Authorization": "Bearer abc"}
+
+
+# --------------------------------------------------------------- secrets
+
+
+def test_read_secret_env_scrubs_environ(monkeypatch, cl):
+    monkeypatch.delenv("ANTHROPIC_API_KEY_FILE", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    assert cl.read_secret("ANTHROPIC_API_KEY") == "sk-test"
+    assert "ANTHROPIC_API_KEY" not in cl.os.environ
+
+
+def test_read_secret_file_wins_and_is_deleted(monkeypatch, tmp_path, cl):
+    keyfile = tmp_path / "key"
+    keyfile.write_text("sk-file\n")
+    monkeypatch.setenv("ANTHROPIC_API_KEY_FILE", str(keyfile))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
+    assert cl.read_secret("ANTHROPIC_API_KEY") == "sk-file"
+    assert not keyfile.exists()
+    assert "ANTHROPIC_API_KEY" not in cl.os.environ
+    assert "ANTHROPIC_API_KEY_FILE" not in cl.os.environ
+
+
+def test_read_secret_unreadable_file_falls_back_to_env(monkeypatch, tmp_path, cl):
+    monkeypatch.setenv("ANTHROPIC_API_KEY_FILE", str(tmp_path / "missing"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
+    assert cl.read_secret("ANTHROPIC_API_KEY") == "sk-env"
+    assert "ANTHROPIC_API_KEY" not in cl.os.environ
+
+
+def test_read_secret_unreadable_file_no_env(monkeypatch, tmp_path, cl):
+    monkeypatch.setenv("ANTHROPIC_API_KEY_FILE", str(tmp_path / "missing"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert cl.read_secret("ANTHROPIC_API_KEY") is None
+
+
+def test_read_secret_missing(monkeypatch, cl):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY_FILE", raising=False)
+    assert cl.read_secret("ANTHROPIC_API_KEY") is None
+
+
+def test_exec_env_strips_secrets(monkeypatch, cl):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("BIOCYPHER_MCP_AUTH_HEADER", "Bearer abc")
+    monkeypatch.setenv("ANTHROPIC_API_KEY_FILE", "/run/secrets/key")
+    env = cl._exec_env()
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "BIOCYPHER_MCP_AUTH_HEADER" not in env
+    assert "ANTHROPIC_API_KEY_FILE" not in env
 
 
 # ------------------------------------------------------- path confinement
