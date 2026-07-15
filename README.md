@@ -44,24 +44,37 @@ ANTHROPIC_API_KEY=dummy ANTHROPIC_BASE_URL=http://localhost:4000 python src/back
 
 ### Using docker-compose
 
-Build the image locally using
+Place your Anthropic API key inside `secrets/anthropic_api_key` (no quotes;
+a trailing newline is fine):
 ```bash
-docker build --no-cache -q -t biocypher-agent-test .
+mkdir -p secrets && printf '%s' "$ANTHROPIC_API_KEY" > secrets/anthropic_api_key
 ```
-Place your Anthropic API key inside `secrets/anthropic_api_key`. Then start the service using
+Then build the image and start the service using
 ```bash
- docker compose run --rm agent
+docker compose build
+docker compose run --rm agent
 ```
+Compose builds and tags the image (`biocypher-agent`) itself and mounts the
+secret at `/run/secrets/anthropic_api_key`, which the container reads via
+`ANTHROPIC_API_KEY_FILE` — the key never enters the container environment.
 This setup is fairly safe for local single-user use. Any `run_command` runs inside the container as a non-root agent user at `/workspace` and the host filesystem is untouchable. The root filesystem is read-only, and there are pids/mem/cpu limits. The API key is read once at startup and then removed from the environment.
 
 ### Env vars
 
 - `ANTHROPIC_API_KEY` — required (any non-empty value for local models)
+- `ANTHROPIC_API_KEY_FILE` — alternative to `ANTHROPIC_API_KEY`: path to a file
+  holding the key; read once at startup and deleted best-effort, so the key
+  never sits in the process environment. Preferred for containers (used by
+  `docker-compose.yml`); wins over the env var, which is scrubbed either way
 - `ANTHROPIC_BASE_URL` — optional, e.g. `http://localhost:4000` for LiteLLM
 - `CLAUDE_MODEL` — default `claude-opus-4-8`
 - `BIOCYPHER_MCP_URL` — default `https://mcp.biocypher.org/mcp`
 - `BIOCYPHER_MCP_AUTH_HEADER` — optional, e.g. `Bearer <token>`
+- `BIOCYPHER_MCP_AUTH_HEADER_FILE` — file variant, same semantics as
+  `ANTHROPIC_API_KEY_FILE`
 - `MCP_RESULT_MAX_CHARS` — default `20000`; cap on result chars reaching context
+- `FILE_TOOLS_ROOT` — default cwd; root dir the read/write/edit file tools are
+  confined to (`/workspace` in the container)
 
 ### Frontend integration
 
