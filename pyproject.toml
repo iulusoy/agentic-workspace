@@ -19,7 +19,6 @@ classifiers = [
 ]
  
 dependencies = [
-    "copilot",
     "anthropic[mcp]",
     "prompt_toolkit",
 ]
@@ -29,9 +28,6 @@ dev = [
     "pre-commit",
     "pytest",
     "pytest-cov",
-    "ruff",
-    "mkdocs-material",
-    "mkdocstrings[python]",
 ]
 
 [project.urls]
