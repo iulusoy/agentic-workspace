@@ -108,9 +108,12 @@ def test_edit_file(workspace, cl):
     assert "not found" in run(
         cl.edit_file.call({"path": "f.txt", "old_string": "zzz", "new_string": "1"})
     )
-    assert run(
-        cl.edit_file.call({"path": "f.txt", "old_string": "two", "new_string": "2"})
-    ) == "edited f.txt"
+    assert (
+        run(
+            cl.edit_file.call({"path": "f.txt", "old_string": "two", "new_string": "2"})
+        )
+        == "edited f.txt"
+    )
     assert (workspace / "f.txt").read_text() == "one 2 one"
 
 
@@ -129,9 +132,10 @@ def test_render_tool_result_text_and_structured(cl):
     assert cl.render_tool_result(_mcp_result(structured={"k": 1})) == json.dumps(
         {"k": 1}
     )
-    assert cl.render_tool_result(
-        _mcp_result(text=["boom"], is_error=True)
-    ) == "[tool error] boom"
+    assert (
+        cl.render_tool_result(_mcp_result(text=["boom"], is_error=True))
+        == "[tool error] boom"
+    )
 
 
 class FakeSession:

@@ -116,7 +116,11 @@ def make_tool(mcp_tool_def, session: ClientSession):
                 text[:RESULT_MAX_CHARS]
                 + f"\n[truncated: {omitted} chars omitted before model context]"
             )
-        print(f"[tool done] {tool_name} ({len(text)} chars to context)", file=sys.stderr, flush=True)
+        print(
+            f"[tool done] {tool_name} ({len(text)} chars to context)",
+            file=sys.stderr,
+            flush=True,
+        )
         return text
 
     return beta_async_tool(
@@ -188,7 +192,11 @@ async def write_file(path: str, content: str) -> str:
             are created as needed.
         content: Full content to write.
     """
-    print(f"\n[tool] write_file {path} ({len(content)} chars)", file=sys.stderr, flush=True)
+    print(
+        f"\n[tool] write_file {path} ({len(content)} chars)",
+        file=sys.stderr,
+        flush=True,
+    )
     try:
         target = _resolve_path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -271,7 +279,9 @@ async def run_command(command: str, timeout_seconds: int = 300) -> str:
     if len(text) > RESULT_MAX_CHARS:
         omitted = len(text) - RESULT_MAX_CHARS
         text = text[:RESULT_MAX_CHARS] + f"\n[truncated: {omitted} chars omitted]"
-    print(f"[tool done] run_command (exit {proc.returncode})", file=sys.stderr, flush=True)
+    print(
+        f"[tool done] run_command (exit {proc.returncode})", file=sys.stderr, flush=True
+    )
     return f"[exit {proc.returncode}]\n{text}"
 
 
@@ -293,8 +303,15 @@ async def print_stream(stream) -> None:
             if not thinking_marked:
                 print("[thinking...]", file=sys.stderr, flush=True)
                 thinking_marked = True
-        elif event.type == "content_block_start" and event.content_block.type == "tool_use":
-            print(f"\n[tool call requested] {event.content_block.name}", file=sys.stderr, flush=True)
+        elif (
+            event.type == "content_block_start"
+            and event.content_block.type == "tool_use"
+        ):
+            print(
+                f"\n[tool call requested] {event.content_block.name}",
+                file=sys.stderr,
+                flush=True,
+            )
     if printed_text:
         print(flush=True)
 
@@ -338,7 +355,9 @@ async def chat(session: ClientSession, tools) -> None:
 
     print(f"Chat with {MODEL} + BioCypher MCP ({MCP_URL}), client-side tool loop.")
     print(f"Tools: {', '.join(t.name for t in tools)}")
-    print("Type a message and press Enter. 'exit', 'quit', Ctrl-D, or empty line to quit.\n")
+    print(
+        "Type a message and press Enter. 'exit', 'quit', Ctrl-D, or empty line to quit.\n"
+    )
 
     while True:
         try:
@@ -397,7 +416,11 @@ async def main() -> None:
             "ANTHROPIC_API_KEY is not set. Set it to your Anthropic key, or to any "
             "non-empty value together with ANTHROPIC_BASE_URL for a local model."
         )
-    async with streamablehttp_client(MCP_URL, headers=mcp_headers()) as (read, write, _):
+    async with streamablehttp_client(MCP_URL, headers=mcp_headers()) as (
+        read,
+        write,
+        _,
+    ):
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools_result = await session.list_tools()
@@ -405,7 +428,9 @@ async def main() -> None:
 
             if "--list-tools" in sys.argv:
                 for t in tools_result.tools:
-                    print(f"{t.name}: {(t.description or '').strip().splitlines()[0] if t.description else ''}")
+                    print(
+                        f"{t.name}: {(t.description or '').strip().splitlines()[0] if t.description else ''}"
+                    )
                 return
 
             await chat(session, tools)
