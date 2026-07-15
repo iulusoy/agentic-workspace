@@ -53,9 +53,15 @@ def test_resolve_path_inside_root(workspace, cl):
     assert cl._resolve_path("sub") == workspace / "sub"
 
 
-@pytest.mark.parametrize("path", ["..", "../outside.txt", "a/../../b"])
-def test_resolve_path_rejects_escape(workspace, cl, path):
-    with pytest.raises(ValueError, match="escapes workspace root"):
+@pytest.mark.parametrize("path", ["..", "../outside.txt", "a/../../b", "a/../b"])
+def test_resolve_path_rejects_dotdot(workspace, cl, path):
+    with pytest.raises(ValueError, match="must not contain"):
+        cl._resolve_path(path)
+
+
+@pytest.mark.parametrize("path", ["/etc/passwd", "C:\\Windows\\system32"])
+def test_resolve_path_rejects_absolute(workspace, cl, path):
+    with pytest.raises(ValueError, match="absolute paths are not allowed"):
         cl._resolve_path(path)
 
 
@@ -90,7 +96,7 @@ def test_read_write_roundtrip(workspace, cl):
 
 def test_read_file_missing_and_escape(workspace, cl):
     assert run(cl.read_file.call({"path": "nope.txt"})).startswith("[tool error]")
-    assert "escapes workspace root" in run(cl.read_file.call({"path": "../x"}))
+    assert "must not contain" in run(cl.read_file.call({"path": "../x"}))
 
 
 def test_read_file_truncates(workspace, small_cap, cl):
@@ -136,6 +142,11 @@ def test_render_tool_result_text_and_structured(cl):
         cl.render_tool_result(_mcp_result(text=["boom"], is_error=True))
         == "[tool error] boom"
     )
+
+
+def test_render_tool_result_empty_structured(cl):
+    assert cl.render_tool_result(_mcp_result(text=["ignored"], structured={})) == "{}"
+    assert cl.render_tool_result(_mcp_result(structured=[])) == "[]"
 
 
 class FakeSession:

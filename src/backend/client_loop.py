@@ -30,7 +30,7 @@ import asyncio
 import json
 import os
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import anthropic
 from anthropic import AsyncAnthropic
@@ -88,7 +88,7 @@ def mcp_headers() -> dict[str, str]:
 
 def render_tool_result(result) -> str:
     """Flatten an MCP CallToolResult to text for model context."""
-    if result.structuredContent:
+    if result.structuredContent is not None:
         text = json.dumps(result.structuredContent)
     else:
         parts = [c.text for c in result.content if getattr(c, "type", None) == "text"]
@@ -132,9 +132,21 @@ def make_tool(mcp_tool_def, session: ClientSession):
 
 
 def _resolve_path(path: str) -> Path:
-    """Resolve a tool-supplied path and confine it to FILE_ROOT."""
-    resolved = (FILE_ROOT / path).resolve()
-    if not resolved.is_relative_to(FILE_ROOT):
+    """Resolve a tool-supplied path and confine it to FILE_ROOT.
+
+    The untrusted input is validated before any path is constructed from it:
+    absolute paths and ``..`` components are rejected outright, so only plain
+    relative paths below the workspace root ever reach the filesystem. The
+    final containment check guards against anything the component validation
+    missed (e.g. symlinks inside the workspace pointing outside it).
+    """
+    candidate = PurePosixPath(path)
+    if candidate.is_absolute() or PureWindowsPath(path).is_absolute():
+        raise ValueError(f"absolute paths are not allowed: {path}")
+    if any(part == ".." for part in candidate.parts):
+        raise ValueError(f"path must not contain '..': {path}")
+    resolved = (FILE_ROOT / candidate).resolve()
+    if resolved != FILE_ROOT and not resolved.is_relative_to(FILE_ROOT):
         raise ValueError(f"path escapes workspace root {FILE_ROOT}: {path}")
     return resolved
 
@@ -343,7 +355,7 @@ async def select_exec_env(prompt: PromptSession) -> None:
     print(f"run_command environment: {EXEC_BIN}{marker}")
 
 
-async def chat(session: ClientSession, tools) -> None:
+async def chat(tools) -> None:
     client = AsyncAnthropic()  # honors ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL
     history: list[dict] = []
     thinking = thinking_config()
@@ -433,7 +445,7 @@ async def main() -> None:
                     )
                 return
 
-            await chat(session, tools)
+            await chat(tools)
 
 
 if __name__ == "__main__":

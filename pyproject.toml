@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aw"
-dynamic = ["version"]
+version = "0.1.0"
 description = "agentic workspace backend"
 readme = "README.md"
 maintainers = [
@@ -35,7 +35,8 @@ homepage = "https://github.com/ssciwr/AMMICO"  # FIXME not shown by pip
 documentation = "https://ssciwr.github.io/AMMICO/build/html/index.html"
 
 [tool.setuptools]
-packages = ["src"]
+package-dir = { "" = "src" }
+packages = ["backend"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
