@@ -64,6 +64,7 @@ def test_read_secret_file_wins_and_is_deleted(monkeypatch, tmp_path, cl):
     assert cl.read_secret("ANTHROPIC_API_KEY") == "sk-file"
     assert not keyfile.exists()
     assert "ANTHROPIC_API_KEY" not in cl.os.environ
+    assert "ANTHROPIC_API_KEY_FILE" not in cl.os.environ
 
 
 def test_read_secret_unreadable_file_falls_back_to_env(monkeypatch, tmp_path, cl):

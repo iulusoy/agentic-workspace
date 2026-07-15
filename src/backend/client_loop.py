@@ -17,6 +17,9 @@ Env vars:
                               best-effort so the key never sits in the process
                               environment — preferred when a per-session
                               container is handed a user-supplied key)
+- ANTHROPIC_AUTH_TOKEN       (optional bearer-token alternative to
+                              ANTHROPIC_API_KEY, e.g. for gateways; _FILE
+                              variant supported like ANTHROPIC_API_KEY_FILE)
 - ANTHROPIC_BASE_URL         (optional, e.g. http://localhost:4000 for LiteLLM)
 - CLAUDE_MODEL               (default: claude-opus-4-8)
 - BIOCYPHER_MCP_URL          (default: https://mcp.biocypher.org/mcp)
@@ -108,10 +111,12 @@ def read_secret(name: str) -> str | None:
     process's environment (/proc/*/environ) nor on disk afterwards. The env
     var fallback also scrubs os.environ so child processes can't inherit it.
     """
-    # Scrub the plain env var unconditionally: even when the _FILE variant is
-    # used, a leftover <name> in os.environ would leak to child processes.
+    # Scrub both variants unconditionally: a leftover <name> in os.environ
+    # would leak the secret itself to child processes, and a leftover
+    # <name>_FILE would point them at the secret file (which survives when
+    # the unlink below fails, e.g. on a read-only secret mount).
     env_secret = os.environ.pop(name, None)
-    path = os.getenv(f"{name}_FILE")
+    path = os.environ.pop(f"{name}_FILE", None)
     if path:
         try:
             secret = Path(path).read_text().strip()
@@ -417,8 +422,10 @@ async def select_exec_env(prompt: PromptSession) -> None:
     print(f"run_command environment: {EXEC_BIN}{marker}")
 
 
-async def chat(tools, api_key: str) -> None:
-    client = AsyncAnthropic(api_key=api_key)  # honors ANTHROPIC_BASE_URL
+async def chat(tools, api_key: str | None, auth_token: str | None) -> None:
+    # honors ANTHROPIC_BASE_URL; auth_token is passed explicitly because
+    # read_secret scrubbed it from the environment the SDK would read it from
+    client = AsyncAnthropic(api_key=api_key, auth_token=auth_token)
     history: list[dict] = []
     thinking = thinking_config()
     # prompt_toolkit: async input keeps the event loop (and the MCP HTTP
@@ -485,8 +492,11 @@ async def chat(tools, api_key: str) -> None:
 
 
 async def main() -> None:
+    # Read (and thereby scrub from os.environ) every secret we know about,
+    # whether or not this run uses it — see SECRET_ENV_VARS.
     api_key = read_secret("ANTHROPIC_API_KEY")
-    if "--list-tools" not in sys.argv and not api_key:
+    auth_token = read_secret("ANTHROPIC_AUTH_TOKEN")
+    if "--list-tools" not in sys.argv and not api_key and not auth_token:
         sys.exit(
             "ANTHROPIC_API_KEY (or ANTHROPIC_API_KEY_FILE) is not set. Set it to "
             "your Anthropic key, or to any non-empty value together with "
@@ -509,7 +519,7 @@ async def main() -> None:
                     )
                 return
 
-            await chat(tools, api_key)
+            await chat(tools, api_key, auth_token)
 
 
 if __name__ == "__main__":
