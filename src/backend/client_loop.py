@@ -108,16 +108,26 @@ def read_secret(name: str) -> str | None:
     process's environment (/proc/*/environ) nor on disk afterwards. The env
     var fallback also scrubs os.environ so child processes can't inherit it.
     """
+    # Scrub the plain env var unconditionally: even when the _FILE variant is
+    # used, a leftover <name> in os.environ would leak to child processes.
+    env_secret = os.environ.pop(name, None)
     path = os.getenv(f"{name}_FILE")
     if path:
-        secret = Path(path).read_text().strip()
+        try:
+            secret = Path(path).read_text().strip()
+        except OSError as exc:
+            print(
+                f"[warn] could not read {name}_FILE ({exc}); "
+                f"falling back to {name} env var",
+                file=sys.stderr,
+            )
+            return env_secret or None
         try:
             Path(path).unlink()
         except OSError:
             pass
         return secret or None
-    secret = os.environ.pop(name, None)
-    return secret or None
+    return env_secret or None
 
 
 def mcp_headers() -> dict[str, str]:
