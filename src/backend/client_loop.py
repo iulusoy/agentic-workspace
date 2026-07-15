@@ -145,7 +145,11 @@ def _resolve_path(path: str) -> Path:
         raise ValueError(f"absolute paths are not allowed: {path}")
     if any(part == ".." for part in candidate.parts):
         raise ValueError(f"path must not contain '..': {path}")
-    resolved = (FILE_ROOT / candidate).resolve()
+    root = str(FILE_ROOT)
+    normalized = os.path.normpath(os.path.join(root, path))
+    if normalized != root and not normalized.startswith(root + os.sep):
+        raise ValueError(f"path escapes workspace root {FILE_ROOT}: {path}")
+    resolved = Path(normalized).resolve()
     if resolved != FILE_ROOT and not resolved.is_relative_to(FILE_ROOT):
         raise ValueError(f"path escapes workspace root {FILE_ROOT}: {path}")
     return resolved
