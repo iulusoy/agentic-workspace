@@ -12,7 +12,7 @@ from conftest import run
 
 
 def test_thinking_config_default_anthropic(monkeypatch):
-    import client_loop as cl
+    from backend import client_loop as cl
 
     monkeypatch.delenv("CLAUDE_THINKING", raising=False)
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
@@ -20,7 +20,7 @@ def test_thinking_config_default_anthropic(monkeypatch):
 
 
 def test_thinking_config_off_for_local_endpoint(monkeypatch):
-    import client_loop as cl
+    from backend import client_loop as cl
 
     monkeypatch.delenv("CLAUDE_THINKING", raising=False)
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://localhost:4000")
@@ -28,7 +28,7 @@ def test_thinking_config_off_for_local_endpoint(monkeypatch):
 
 
 def test_thinking_config_explicit_override(monkeypatch):
-    import client_loop as cl
+    from backend import client_loop as cl
 
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://localhost:4000")
     monkeypatch.setenv("CLAUDE_THINKING", "adaptive")

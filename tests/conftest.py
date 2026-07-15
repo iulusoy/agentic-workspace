@@ -1,14 +1,10 @@
-"""Make src/backend importable and provide shared fixtures."""
+"""Shared fixtures for the client_loop tests."""
 
 import asyncio
-import sys
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" / "backend"))
-
-import client_loop  # noqa: E402
+from backend import client_loop
 
 
 @pytest.fixture
