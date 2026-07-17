@@ -57,26 +57,33 @@ MODEL = os.getenv("CLAUDE_MODEL", "claude-opus-4-8")
 MCP_URL = os.getenv("BIOCYPHER_MCP_URL", "https://mcp.biocypher.org/mcp")
 RESULT_MAX_CHARS = int(os.getenv("MCP_RESULT_MAX_CHARS", "20000"))
 FILE_ROOT = Path(os.getenv("FILE_TOOLS_ROOT", ".")).resolve()
-SYSTEM_PROMPT = (
-    "You are a helpful assistant with access to BioCypher tools via MCP. "
-    "Use them when relevant to answer questions about biomedical knowledge "
-    "graphs, available workflows, schema, and data sources. "
-    "You also have list_dir, read_file, write_file, and edit_file tools for local "
-    f"files under the workspace root ({FILE_ROOT}), and a run_command tool that "
-    "executes shell commands there in the user-selected Python environment. "
-    "MANDATORY when creating a new BioCypher project or adapter: first call "
-    "check_project_exists and get_cookiecutter_instructions, then scaffold the "
-    "project by running cookiecutter via run_command exactly as those "
-    "instructions say (pip-install cookiecutter into the environment first if "
-    "missing). Never create the project or adapter directory structure by hand "
-    "with write_file; only fill in or edit files inside the scaffolded structure. "
-    "MANDATORY after implementing or changing code: run the test suite via "
-    "run_command (pytest) and fix failures until it passes, or report exactly "
-    "what still fails and why. "
-    f"Tool results are truncated after {RESULT_MAX_CHARS} characters; if a "
-    "result is cut off, narrow the tool arguments (filters, specific phases "
-    "or topics) instead of repeating the same call."
-)
+
+
+def build_system_prompt(root: Path, result_max_chars: int) -> str:
+    """System prompt for one workspace; the API service builds it per session."""
+    return (
+        "You are a helpful assistant with access to BioCypher tools via MCP. "
+        "Use them when relevant to answer questions about biomedical knowledge "
+        "graphs, available workflows, schema, and data sources. "
+        "You also have list_dir, read_file, write_file, and edit_file tools for local "
+        f"files under the workspace root ({root}), and a run_command tool that "
+        "executes shell commands there in the user-selected Python environment. "
+        "MANDATORY when creating a new BioCypher project or adapter: first call "
+        "check_project_exists and get_cookiecutter_instructions, then scaffold the "
+        "project by running cookiecutter via run_command exactly as those "
+        "instructions say (pip-install cookiecutter into the environment first if "
+        "missing). Never create the project or adapter directory structure by hand "
+        "with write_file; only fill in or edit files inside the scaffolded structure. "
+        "MANDATORY after implementing or changing code: run the test suite via "
+        "run_command (pytest) and fix failures until it passes, or report exactly "
+        "what still fails and why. "
+        f"Tool results are truncated after {result_max_chars} characters; if a "
+        "result is cut off, narrow the tool arguments (filters, specific phases "
+        "or topics) instead of repeating the same call."
+    )
+
+
+SYSTEM_PROMPT = build_system_prompt(FILE_ROOT, RESULT_MAX_CHARS)
 
 
 def thinking_config() -> dict | None:
@@ -185,8 +192,8 @@ def make_tool(mcp_tool_def, session: ClientSession):
     )
 
 
-def _resolve_path(path: str) -> Path:
-    """Resolve a tool-supplied path and confine it to FILE_ROOT.
+def resolve_in_root(path: str, root: Path) -> Path:
+    """Resolve a tool-supplied path and confine it to ``root``.
 
     The untrusted input is validated before any path is constructed from it:
     absolute paths and ``..`` components are rejected outright, so only plain
@@ -199,109 +206,18 @@ def _resolve_path(path: str) -> Path:
         raise ValueError(f"absolute paths are not allowed: {path}")
     if any(part == ".." for part in candidate.parts):
         raise ValueError(f"path must not contain '..': {path}")
-    root = str(FILE_ROOT)
-    normalized = os.path.normpath(os.path.join(root, path))
-    if normalized != root and not normalized.startswith(root + os.sep):
-        raise ValueError(f"path escapes workspace root {FILE_ROOT}: {path}")
+    root_str = str(root)
+    normalized = os.path.normpath(os.path.join(root_str, path))
+    if normalized != root_str and not normalized.startswith(root_str + os.sep):
+        raise ValueError(f"path escapes workspace root {root}: {path}")
     resolved = Path(normalized).resolve()
-    if resolved != FILE_ROOT and not resolved.is_relative_to(FILE_ROOT):
-        raise ValueError(f"path escapes workspace root {FILE_ROOT}: {path}")
+    if resolved != root and not resolved.is_relative_to(root):
+        raise ValueError(f"path escapes workspace root {root}: {path}")
     return resolved
 
 
-@beta_async_tool
-async def list_dir(path: str = ".") -> str:
-    """List the files and subdirectories of a directory.
-
-    Args:
-        path: Directory path, relative to the workspace root. Defaults to
-            the workspace root itself.
-    """
-    print(f"\n[tool] list_dir {path}", file=sys.stderr, flush=True)
-    try:
-        entries = sorted(
-            _resolve_path(path).iterdir(),
-            key=lambda p: (not p.is_dir(), p.name),
-        )
-    except (OSError, ValueError) as e:
-        return f"[tool error] {e}"
-    if not entries:
-        return "[empty directory]"
-    lines = [f"{e.name}/" if e.is_dir() else e.name for e in entries]
-    text = "\n".join(lines)
-    if len(text) > RESULT_MAX_CHARS:
-        omitted = len(text) - RESULT_MAX_CHARS
-        text = text[:RESULT_MAX_CHARS] + f"\n[truncated: {omitted} chars omitted]"
-    return text
-
-
-@beta_async_tool
-async def read_file(path: str) -> str:
-    """Read a text file and return its content.
-
-    Args:
-        path: File path, relative to the workspace root.
-    """
-    print(f"\n[tool] read_file {path}", file=sys.stderr, flush=True)
-    try:
-        text = _resolve_path(path).read_text()
-    except (OSError, ValueError) as e:
-        return f"[tool error] {e}"
-    if len(text) > RESULT_MAX_CHARS:
-        omitted = len(text) - RESULT_MAX_CHARS
-        text = text[:RESULT_MAX_CHARS] + f"\n[truncated: {omitted} chars omitted]"
-    return text
-
-
-@beta_async_tool
-async def write_file(path: str, content: str) -> str:
-    """Create or overwrite a text file with the given content.
-
-    Args:
-        path: File path, relative to the workspace root. Parent directories
-            are created as needed.
-        content: Full content to write.
-    """
-    print(
-        f"\n[tool] write_file {path} ({len(content)} chars)",
-        file=sys.stderr,
-        flush=True,
-    )
-    try:
-        target = _resolve_path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content)
-    except (OSError, ValueError) as e:
-        return f"[tool error] {e}"
-    return f"wrote {len(content)} chars to {path}"
-
-
-@beta_async_tool
-async def edit_file(path: str, old_string: str, new_string: str) -> str:
-    """Replace an exact string in an existing text file.
-
-    Args:
-        path: File path, relative to the workspace root.
-        old_string: Exact text to replace; must occur exactly once. Include
-            surrounding lines to make it unique.
-        new_string: Replacement text.
-    """
-    print(f"\n[tool] edit_file {path}", file=sys.stderr, flush=True)
-    try:
-        target = _resolve_path(path)
-        text = target.read_text()
-    except (OSError, ValueError) as e:
-        return f"[tool error] {e}"
-    count = text.count(old_string)
-    if count == 0:
-        return "[tool error] old_string not found in file"
-    if count > 1:
-        return f"[tool error] old_string occurs {count} times; add context to make it unique"
-    try:
-        target.write_text(text.replace(old_string, new_string, 1))
-    except OSError as e:
-        return f"[tool error] {e}"
-    return f"edited {path}"
+def _resolve_path(path: str) -> Path:
+    return resolve_in_root(path, FILE_ROOT)
 
 
 # Bin directory of the Python environment used by run_command; set at chat
@@ -309,7 +225,7 @@ async def edit_file(path: str, old_string: str, new_string: str) -> str:
 EXEC_BIN: Path | None = None
 
 
-def _exec_env() -> dict[str, str]:
+def _exec_env(exec_bin: Path | None = None) -> dict[str, str]:
     """Environment for run_command subprocesses, with secrets removed.
 
     Secrets are already scrubbed from os.environ by read_secret at startup;
@@ -320,51 +236,177 @@ def _exec_env() -> dict[str, str]:
     for var in SECRET_ENV_VARS:
         env.pop(var, None)
         env.pop(f"{var}_FILE", None)
-    if EXEC_BIN is not None:
-        env["PATH"] = f"{EXEC_BIN}{os.pathsep}{env.get('PATH', '')}"
+    if exec_bin is None:
+        exec_bin = EXEC_BIN
+    if exec_bin is not None:
+        env["PATH"] = f"{exec_bin}{os.pathsep}{env.get('PATH', '')}"
     return env
 
 
-@beta_async_tool
-async def run_command(command: str, timeout_seconds: int = 300) -> str:
-    """Run a shell command in the workspace root.
+def make_file_tools(
+    get_root,
+    get_exec_bin=None,
+    get_cap=None,
+    on_fs_change=None,
+):
+    """Build the five workspace tools bound to one workspace root.
 
-    The selected Python environment's bin directory is first on PATH, so
-    `python`, `pip`, `pytest`, and `cookiecutter` resolve from it. Use this to
-    scaffold projects with cookiecutter and to run code and tests.
-
-    Args:
-        command: Shell command to run (cwd is the workspace root).
-        timeout_seconds: Kill the command after this many seconds (default 300).
+    All parameters are zero-argument callables (except ``on_fs_change``, which
+    takes the changed path): the CLI binds them to the module globals so they
+    stay monkeypatchable, and the API service binds them to per-session state.
+    ``on_fs_change`` is called after every mutation (write/edit/command) so the
+    service can emit ``fs_changed`` events; an empty-string path means
+    "anything under the root may have changed".
     """
-    print(f"\n[tool] run_command {command}", file=sys.stderr, flush=True)
-    try:
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            cwd=FILE_ROOT,
-            env=_exec_env(),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+    get_exec_bin = get_exec_bin or (lambda: None)
+    get_cap = get_cap or (lambda: RESULT_MAX_CHARS)
+    notify = on_fs_change or (lambda path: None)
+
+    def _resolve(path: str) -> Path:
+        return resolve_in_root(path, get_root())
+
+    def _truncate(text: str) -> str:
+        cap = get_cap()
+        if len(text) > cap:
+            omitted = len(text) - cap
+            return text[:cap] + f"\n[truncated: {omitted} chars omitted]"
+        return text
+
+    @beta_async_tool
+    async def list_dir(path: str = ".") -> str:
+        """List the files and subdirectories of a directory.
+
+        Args:
+            path: Directory path, relative to the workspace root. Defaults to
+                the workspace root itself.
+        """
+        print(f"\n[tool] list_dir {path}", file=sys.stderr, flush=True)
+        try:
+            entries = sorted(
+                _resolve(path).iterdir(),
+                key=lambda p: (not p.is_dir(), p.name),
+            )
+        except (OSError, ValueError) as e:
+            return f"[tool error] {e}"
+        if not entries:
+            return "[empty directory]"
+        lines = [f"{e.name}/" if e.is_dir() else e.name for e in entries]
+        return _truncate("\n".join(lines))
+
+    @beta_async_tool
+    async def read_file(path: str) -> str:
+        """Read a text file and return its content.
+
+        Args:
+            path: File path, relative to the workspace root.
+        """
+        print(f"\n[tool] read_file {path}", file=sys.stderr, flush=True)
+        try:
+            text = _resolve(path).read_text()
+        except (OSError, ValueError) as e:
+            return f"[tool error] {e}"
+        return _truncate(text)
+
+    @beta_async_tool
+    async def write_file(path: str, content: str) -> str:
+        """Create or overwrite a text file with the given content.
+
+        Args:
+            path: File path, relative to the workspace root. Parent directories
+                are created as needed.
+            content: Full content to write.
+        """
+        print(
+            f"\n[tool] write_file {path} ({len(content)} chars)",
+            file=sys.stderr,
+            flush=True,
         )
         try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return f"[tool error] command timed out after {timeout_seconds}s"
-    except OSError as e:
-        return f"[tool error] {e}"
-    text = out.decode(errors="replace")
-    if len(text) > RESULT_MAX_CHARS:
-        omitted = len(text) - RESULT_MAX_CHARS
-        text = text[:RESULT_MAX_CHARS] + f"\n[truncated: {omitted} chars omitted]"
-    print(
-        f"[tool done] run_command (exit {proc.returncode})", file=sys.stderr, flush=True
-    )
-    return f"[exit {proc.returncode}]\n{text}"
+            target = _resolve(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        except (OSError, ValueError) as e:
+            return f"[tool error] {e}"
+        notify(path)
+        return f"wrote {len(content)} chars to {path}"
+
+    @beta_async_tool
+    async def edit_file(path: str, old_string: str, new_string: str) -> str:
+        """Replace an exact string in an existing text file.
+
+        Args:
+            path: File path, relative to the workspace root.
+            old_string: Exact text to replace; must occur exactly once. Include
+                surrounding lines to make it unique.
+            new_string: Replacement text.
+        """
+        print(f"\n[tool] edit_file {path}", file=sys.stderr, flush=True)
+        try:
+            target = _resolve(path)
+            text = target.read_text()
+        except (OSError, ValueError) as e:
+            return f"[tool error] {e}"
+        count = text.count(old_string)
+        if count == 0:
+            return "[tool error] old_string not found in file"
+        if count > 1:
+            return f"[tool error] old_string occurs {count} times; add context to make it unique"
+        try:
+            target.write_text(text.replace(old_string, new_string, 1))
+        except OSError as e:
+            return f"[tool error] {e}"
+        notify(path)
+        return f"edited {path}"
+
+    @beta_async_tool
+    async def run_command(command: str, timeout_seconds: int = 300) -> str:
+        """Run a shell command in the workspace root.
+
+        The selected Python environment's bin directory is first on PATH, so
+        `python`, `pip`, `pytest`, and `cookiecutter` resolve from it. Use this to
+        scaffold projects with cookiecutter and to run code and tests.
+
+        Args:
+            command: Shell command to run (cwd is the workspace root).
+            timeout_seconds: Kill the command after this many seconds (default 300).
+        """
+        print(f"\n[tool] run_command {command}", file=sys.stderr, flush=True)
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                cwd=get_root(),
+                env=_exec_env(get_exec_bin()),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            try:
+                out, _ = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return f"[tool error] command timed out after {timeout_seconds}s"
+        except OSError as e:
+            return f"[tool error] {e}"
+        text = out.decode(errors="replace")
+        print(
+            f"[tool done] run_command (exit {proc.returncode})",
+            file=sys.stderr,
+            flush=True,
+        )
+        notify("")
+        return f"[exit {proc.returncode}]\n{_truncate(text)}"
+
+    return [list_dir, read_file, write_file, edit_file, run_command]
 
 
-FILE_TOOLS = [list_dir, read_file, write_file, edit_file, run_command]
+FILE_TOOLS = make_file_tools(
+    get_root=lambda: FILE_ROOT,
+    get_exec_bin=lambda: EXEC_BIN,
+    get_cap=lambda: RESULT_MAX_CHARS,
+)
+list_dir, read_file, write_file, edit_file, run_command = FILE_TOOLS
 
 
 async def print_stream(stream) -> None:
