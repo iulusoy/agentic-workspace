@@ -24,7 +24,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -254,13 +254,32 @@ def _check_if_match(target, if_match: str | None) -> None:
 
 
 def _add_file_put_route(router: APIRouter, session_dep) -> None:
-    @router.put("/sessions/{session_id}/file", responses=_responses(400, 401, 409))
+    @router.put(
+        "/sessions/{session_id}/file",
+        responses=_responses(400, 401, 409),
+        # If-Match is read from the raw request (not a Header parameter with a
+        # None default), so it is documented here by hand for the OpenAPI
+        # schema.
+        openapi_extra={
+            "parameters": [
+                {
+                    "in": "header",
+                    "name": "If-Match",
+                    "schema": {"type": "string"},
+                    "required": False,
+                    "description": "ETag from the last GET of this file; "
+                    "the write is rejected with 409 if the file changed since.",
+                }
+            ]
+        },
+    )
     async def write_file(
         path: str,
         body: FileIn,
         session: session_dep,
-        if_match: Annotated[str | None, Header()] = None,
+        request: Request,
     ):
+        if_match = request.headers.get("if-match")
         target = _resolve(session, path)
         if target.is_dir():
             raise HTTPException(409, f"is a directory: {path}")
