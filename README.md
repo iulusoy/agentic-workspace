@@ -1,9 +1,5 @@
 # agentic-workspace
-Agentic workspace prototype for BioCypher registry
-
-- claude sdk: claude has skill with this that will be loaded automatically in the chat
-- gh copilot sdk: seems more mature on the javascript side
-- client-side loop (`src/backend/client_loop.py`): backend is the MCP client, provider-swappable — see below
+Agentic workspace prototype for BioCypher registry with a client-side loop (`src/backend/client_loop.py`).
 
 ## Client-side tool loop (`src/backend/client_loop.py`)
 
@@ -11,9 +7,7 @@ Chat with an LLM + BioCypher MCP where **this backend is the MCP client**. It
 connects directly to `https://mcp.biocypher.org/mcp` over streamable HTTP,
 executes every tool call itself, and hands only the (optionally truncated) tool
 result to the model. The Anthropic remote-MCP connector is not used — Anthropic
-never contacts the MCP server. This is what `claude_sdk.py` does *not* do:
-there, Anthropic's servers connect to the MCP endpoint and full tool results
-round-trip through Anthropic.
+never contacts the MCP server.
 
 The LLM provider is a config switch, same code path for both:
 
@@ -29,18 +23,54 @@ local model that is zero and with Anthropic it is bounded to what you allow.
 
 ### Install & run
 
+Local install of the package:
+```bash
+uv pip install -e .
 ```
-conda activate aw               # or: pip install -e .   (pulls anthropic[mcp])
-
-# MCP connectivity check — no LLM key needed:
+Install including the API:
+```bash
+uv pip install -e .[server]  # or [dev]
+```
+To test the MCP connectivity, for this you do not need an LLM key:
+```
 python src/backend/client_loop.py --list-tools
-
-# Anthropic:
+```
+To run the full client with an API key, either pass it to the file as environment variable or use the docker compose setup (see below):
+```bash
 ANTHROPIC_API_KEY=sk-... python src/backend/client_loop.py
-
-# Local model (start LiteLLM/llama.cpp first):
+```
+To run with a local model (not tested yet, start LiteLLM/llama.cpp first):
+```
 ANTHROPIC_API_KEY=dummy ANTHROPIC_BASE_URL=http://localhost:4000 python src/backend/client_loop.py
 ```
+
+### Workspace API server (`src/backend/api.py` + `src/backend/service.py`)
+
+The same tool loop lifted into a FastAPI service for the three-pane workspace
+UI (chat / directory tree / editor — full reference in [API.md](API.md)). Each
+session gets its own workspace directory, MCP connection, history, and
+user-supplied key (BYOK via `POST .../key`, never through chat messages).
+
+> **Warning:** sessions can run arbitrary shell commands (`run_command`) in
+> the server's context — run this service only inside the hardened container,
+> bound to localhost or behind TLS + a rate-limiting proxy. Details in
+> [API.md § Security model](API.md#security-model--read-before-deploying).
+
+```bash
+pip install -e ".[server]"        # or [dev]
+uvicorn backend.api:create_app --factory --port 8100
+# or: python -m backend.api
+
+curl -X POST localhost:8100/agent/api/v1/sessions   # → session_id + token
+```
+
+Routes live under `AGENT_API_PREFIX` (default `/agent/api/v1`) so the service
+can sit behind the registry's nginx unchanged. Extra env vars:
+`AGENT_WORKSPACES_ROOT` (default `./workspaces`), `AGENT_API_HOST`/`_PORT`,
+`AGENT_SESSION_READY_TIMEOUT`. Progress streams as SSE from
+`GET /sessions/{id}/events` (`text_delta`, `tool_call`, `tool_result` preview,
+`usage`, `fs_changed`, `turn_done`); file endpoints use `ETag`/`If-Match` for
+editor-vs-agent conflict detection.
 
 ### Using docker-compose
 
