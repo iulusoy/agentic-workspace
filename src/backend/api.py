@@ -236,7 +236,24 @@ def _add_file_read_routes(router: APIRouter, session_dep) -> None:
         return {"path": path, "content": content, "etag": _etag(content)}
 
 
-def _add_file_write_routes(router: APIRouter, session_dep) -> None:
+def _check_if_match(target, if_match: str | None) -> None:
+    """409 when the file changed (or vanished) since the editor loaded it.
+
+    The check is atomic against the agent's file tools (same event loop, no
+    await in between) but not against a concurrent run_command subprocess
+    writing the same file.
+    """
+    if if_match is None:
+        return
+    if not target.is_file():
+        raise HTTPException(409, "file no longer exists")
+    if _etag(target.read_text()) != if_match:
+        # The agent (or another editor) changed the file since it was loaded;
+        # the frontend re-fetches and shows a conflict banner.
+        raise HTTPException(409, "file changed since it was loaded")
+
+
+def _add_file_put_route(router: APIRouter, session_dep) -> None:
     @router.put("/sessions/{session_id}/file", responses=_responses(400, 401, 409))
     async def write_file(
         path: str,
@@ -247,19 +264,8 @@ def _add_file_write_routes(router: APIRouter, session_dep) -> None:
         target = _resolve(session, path)
         if target.is_dir():
             raise HTTPException(409, f"is a directory: {path}")
-        # Note: the etag check is atomic against the agent's file tools (same
-        # event loop, no await in between) but not against a concurrent
-        # run_command subprocess writing the same file.
         try:
-            if if_match is not None:
-                if not target.is_file():
-                    raise HTTPException(409, "file no longer exists")
-                current = _etag(target.read_text())
-                if current != if_match:
-                    # The agent (or another editor) changed the file since it
-                    # was loaded; the frontend re-fetches and shows a conflict
-                    # banner.
-                    raise HTTPException(409, "file changed since it was loaded")
+            _check_if_match(target, if_match)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(body.content)
         except OSError as e:
@@ -268,6 +274,8 @@ def _add_file_write_routes(router: APIRouter, session_dep) -> None:
         session.publish("fs_changed", paths=[path])
         return {"path": path, "etag": _etag(body.content)}
 
+
+def _add_file_delete_route(router: APIRouter, session_dep) -> None:
     @router.delete(
         "/sessions/{session_id}/file",
         status_code=204,
@@ -316,7 +324,8 @@ def _build_router(mgr: SessionManager) -> APIRouter:
     _add_chat_routes(router, session_dep)
     _add_event_routes(router, mgr, session_dep)
     _add_file_read_routes(router, session_dep)
-    _add_file_write_routes(router, session_dep)
+    _add_file_put_route(router, session_dep)
+    _add_file_delete_route(router, session_dep)
     return router
 
 

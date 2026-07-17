@@ -385,5 +385,6 @@ class SessionManager:
         shutil.rmtree(session.workspace, ignore_errors=True)
 
     async def shutdown(self) -> None:
-        for session_id in list(self.sessions):
-            await self.delete(session_id)
+        # delete() mutates self.sessions, so don't iterate it directly.
+        while self.sessions:
+            await self.delete(next(iter(self.sessions)))
