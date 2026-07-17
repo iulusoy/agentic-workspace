@@ -156,6 +156,123 @@ def test_turn_api_error_rolls_back_history(tmp_path):
     asyncio.run(scenario())
 
 
+def test_turn_unexpected_error_confined_to_turn(tmp_path):
+    class ExplodingRunner:
+        def __aiter__(self):
+            async def gen():
+                raise RuntimeError("unexpected bug")
+                yield  # pragma: no cover
+
+            return gen()
+
+    async def scenario():
+        manager = make_manager(tmp_path)
+        session = await manager.create()
+        session.set_key("sk-test", None)
+        session.client_factory = fake_client_factory(ExplodingRunner())
+        events = await run_turn(session, "hello")
+        assert events[-1]["type"] == "turn_error"
+        assert "unexpected bug" in events[-1]["data"]["message"]
+        assert session.history == []
+        assert session.busy is False
+        assert session.error is None  # session survives, actor keeps running
+        assert not session.actor.done()
+        await manager.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_actor_death_unbricks_session(tmp_path):
+    from contextlib import asynccontextmanager
+
+    class DyingMcp:
+        async def list_tools(self):
+            from types import SimpleNamespace
+
+            return SimpleNamespace(tools=[])
+
+        async def call_tool(self, name, arguments):  # pragma: no cover
+            raise AssertionError("not used")
+
+    @asynccontextmanager
+    async def dying_mcp_connect(url, headers):
+        mcp = DyingMcp()
+        yield mcp
+        # context exit is fine; death is simulated via the queue poison below
+
+    async def scenario():
+        manager = make_manager(tmp_path, mcp_connect=dying_mcp_connect)
+        session = await manager.create()
+        # Make the next inbox item explode inside the actor itself (not the
+        # turn task) by poisoning turn-task creation.
+        session._run_turn = None  # type: ignore[assignment]
+        session.busy = True
+        session.inbox.put_nowait(("turn-x", "boom"))
+        await asyncio.wait_for(session.actor, timeout=5)
+        assert session.error is not None
+        assert session.busy is False
+        assert session.inbox.empty()
+        await manager.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_subscriber_queue_drops_oldest_when_full(tmp_path):
+    async def scenario():
+        from backend import service
+
+        manager = make_manager(tmp_path)
+        session = await manager.create()
+        queue = session.subscribe()
+        for i in range(service.EVENT_QUEUE_SIZE + 5):
+            session.publish("text_delta", text=str(i))
+        assert queue.qsize() == service.EVENT_QUEUE_SIZE
+        first = queue.get_nowait()
+        assert first["data"]["text"] == "5"  # oldest five dropped
+        await manager.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_delete_publishes_session_closed(tmp_path):
+    async def scenario():
+        manager = make_manager(tmp_path)
+        session = await manager.create()
+        queue = session.subscribe()
+        await manager.delete(session.id)
+        events = []
+        while not queue.empty():
+            events.append(queue.get_nowait())
+        assert events[-1]["type"] == "session_closed"
+        assert not session.subscribers
+
+    asyncio.run(scenario())
+
+
+def test_interrupt_cancels_queued_turn(tmp_path):
+    from pathlib import Path
+
+    from backend.service import Session
+
+    async def scenario():
+        # Session without a running actor: the turn stays queued, exactly the
+        # window where interrupt() used to report "nothing to interrupt".
+        session = Session("sid", Path(tmp_path), "url", {})
+        queue = session.subscribe()
+        session.busy = True
+        session.inbox.put_nowait(("turn-9", "hello"))
+        assert session.interrupt() is True
+        assert session.busy is False
+        assert session.inbox.empty()
+        event = queue.get_nowait()
+        assert event["type"] == "turn_error"
+        assert event["data"] == {"turn_id": "turn-9", "message": "interrupted"}
+        # nothing queued, nothing running -> nothing to interrupt
+        assert session.interrupt() is False
+
+    asyncio.run(scenario())
+
+
 def test_fs_change_event_from_file_tool(tmp_path):
     async def scenario():
         manager = make_manager(tmp_path)

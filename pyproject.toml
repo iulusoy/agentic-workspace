@@ -10,7 +10,8 @@ readme = "README.md"
 maintainers = [
     { name = "Inga Ulusoy", email = "ssc@iwr.uni-heidelberg.de" },
 ]
-requires-python = ">=3.9"
+# asyncio.timeout (backend.api) needs 3.11; `X | Y` annotations need 3.10.
+requires-python = ">=3.11"
 license = { text = "MIT" }
 classifiers = [
     "Programming Language :: Python :: 3",

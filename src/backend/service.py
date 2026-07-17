@@ -37,6 +37,8 @@ from backend import client_loop as cl
 READY_TIMEOUT = float(os.getenv("AGENT_SESSION_READY_TIMEOUT", "30"))
 # Chars of each tool result included in the tool_result SSE event.
 EVENT_PREVIEW_CHARS = 500
+# Max events buffered per SSE subscriber; oldest are dropped beyond this.
+EVENT_QUEUE_SIZE = 1000
 
 
 class SessionStartupError(Exception):
@@ -50,6 +52,10 @@ async def connect_mcp(url: str, headers: dict[str, str]):
         async with ClientSession(read, write) as mcp:
             await mcp.initialize()
             yield mcp
+
+
+def _first_line(description: str | None) -> str:
+    return description.strip().splitlines()[0] if description else ""
 
 
 def _block_get(block, key, default=None):
@@ -72,8 +78,14 @@ def _tool_result_text(content) -> str:
 
 
 class Session:
-    def __init__(self, workspace: Path, mcp_url: str, mcp_headers: dict[str, str]):
-        self.id = uuid.uuid4().hex
+    def __init__(
+        self,
+        session_id: str,
+        workspace: Path,
+        mcp_url: str,
+        mcp_headers: dict[str, str],
+    ):
+        self.id = session_id
         self.token = secrets.token_urlsafe(32)
         self.workspace = workspace
         self.mcp_url = mcp_url
@@ -116,10 +128,19 @@ class Session:
         self._seq += 1
         event = {"seq": self._seq, "type": event_type, "data": data}
         for queue in list(self.subscribers):
-            queue.put_nowait(event)
+            # Bounded queue: a stalled SSE consumer must not grow memory for
+            # the session's lifetime. SSE has no replay anyway, so the oldest
+            # event is the cheapest one to drop.
+            while True:
+                try:
+                    queue.put_nowait(event)
+                    break
+                except asyncio.QueueFull:
+                    with contextlib.suppress(asyncio.QueueEmpty):
+                        queue.get_nowait()
 
     def subscribe(self) -> asyncio.Queue:
-        queue: asyncio.Queue = asyncio.Queue()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=EVENT_QUEUE_SIZE)
         self.subscribers.add(queue)
         return queue
 
@@ -140,19 +161,8 @@ class Session:
                     cl.make_tool(t, mcp) for t in listed.tools
                 ] + self.file_tools
                 self.tool_defs = [
-                    {
-                        "name": t.name,
-                        "description": (t.description or "").strip().splitlines()[0]
-                        if t.description
-                        else "",
-                    }
-                    for t in listed.tools
-                ] + [
-                    {
-                        "name": t.name,
-                        "description": (t.description or "").strip().splitlines()[0],
-                    }
-                    for t in self.file_tools
+                    {"name": t.name, "description": _first_line(t.description)}
+                    for t in list(listed.tools) + self.file_tools
                 ]
                 self.ready.set()
                 while True:
@@ -175,6 +185,11 @@ class Session:
         except Exception as e:  # noqa: BLE001 — session becomes unusable, record why
             self.error = f"{type(e).__name__}: {e}"
             self.ready.set()
+            # Unbrick clients: no turn will ever run again, so nothing may
+            # stay queued or claim the busy slot.
+            self.busy = False
+            while not self.inbox.empty():
+                self.inbox.get_nowait()
             self.publish("session_error", message=self.error)
 
     async def _run_turn(self, turn_id: str, content: str) -> None:
@@ -245,6 +260,18 @@ class Session:
             del self.history[snapshot:]
             self.busy = False
             self.publish("turn_error", turn_id=turn_id, message=str(e))
+        except Exception as e:  # noqa: BLE001
+            # Any other failure is confined to this turn: same rollback, and
+            # the session (and its MCP connection) stays usable. Without this
+            # the exception would propagate into run_actor and kill the
+            # session with a dangling user message in history.
+            del self.history[snapshot:]
+            self.busy = False
+            self.publish(
+                "turn_error",
+                turn_id=turn_id,
+                message=f"internal error: {type(e).__name__}: {e}",
+            )
 
     async def _emit_stream(self, stream) -> None:
         thinking_marked = False
@@ -259,6 +286,24 @@ class Session:
         if self.turn_task is not None and not self.turn_task.done():
             self.turn_task.cancel()
             return True
+        if self.busy:
+            # Turn accepted but not yet dequeued by the actor: pull it back
+            # out of the inbox so it never starts. The poison pill (None)
+            # must survive draining — put it back.
+            interrupted = False
+            requeue = []
+            while not self.inbox.empty():
+                item = self.inbox.get_nowait()
+                if item is None:
+                    requeue.append(item)
+                else:
+                    interrupted = True
+                    self.publish("turn_error", turn_id=item[0], message="interrupted")
+            for item in requeue:
+                self.inbox.put_nowait(item)
+            if interrupted:
+                self.busy = False
+                return True
         return False
 
 
@@ -282,9 +327,10 @@ class SessionManager:
 
     async def create(self) -> Session:
         self.workspaces_root.mkdir(parents=True, exist_ok=True)
-        session = Session(self.workspaces_root, self.mcp_url, self.mcp_headers)
-        session.workspace = self.workspaces_root / session.id
-        session.workspace.mkdir()
+        session_id = uuid.uuid4().hex
+        workspace = self.workspaces_root / session_id
+        workspace.mkdir()
+        session = Session(session_id, workspace, self.mcp_url, self.mcp_headers)
         if self.mcp_connect is not None:
             session.mcp_connect = self.mcp_connect
         session.actor = asyncio.create_task(session.run_actor())
@@ -315,10 +361,14 @@ class SessionManager:
             session.inbox.put_nowait(None)
             try:
                 await asyncio.wait_for(session.actor, timeout=10)
-            except (asyncio.TimeoutError, Exception):
+            except Exception:
                 session.actor.cancel()
                 with contextlib.suppress(Exception, asyncio.CancelledError):
                     await session.actor
+        # Tell open SSE streams the session is gone — they end on this event
+        # instead of heartbeating a dead session forever.
+        session.publish("session_closed")
+        session.subscribers.clear()
         shutil.rmtree(session.workspace, ignore_errors=True)
 
     async def shutdown(self) -> None:

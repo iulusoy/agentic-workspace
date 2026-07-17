@@ -149,6 +149,12 @@ def create_app(manager: SessionManager | None = None) -> FastAPI:
 
         async def stream():
             try:
+                # The session can be deleted between auth and the generator
+                # starting; its teardown already published session_closed to
+                # the subscribers it knew about, which excludes this one.
+                if mgr.get(session.id) is not session:
+                    yield "event: session_closed\ndata: {}\n\n"
+                    return
                 snapshot = {
                     "has_key": session.has_key,
                     "busy": session.busy,
@@ -156,11 +162,12 @@ def create_app(manager: SessionManager | None = None) -> FastAPI:
                 }
                 yield f"event: session_state\ndata: {json.dumps(snapshot)}\n\n"
                 while True:
+                    # asyncio.timeout rather than wait_for: wait_for's cancel
+                    # of Queue.get can drop a just-delivered event.
                     try:
-                        event = await asyncio.wait_for(
-                            queue.get(), timeout=HEARTBEAT_SECONDS
-                        )
-                    except asyncio.TimeoutError:
+                        async with asyncio.timeout(HEARTBEAT_SECONDS):
+                            event = await queue.get()
+                    except TimeoutError:
                         yield ": heartbeat\n\n"
                         continue
                     yield (
@@ -168,6 +175,8 @@ def create_app(manager: SessionManager | None = None) -> FastAPI:
                         f"id: {event['seq']}\n"
                         f"data: {json.dumps(event['data'])}\n\n"
                     )
+                    if event["type"] == "session_closed":
+                        return
             finally:
                 session.unsubscribe(queue)
 
@@ -178,6 +187,11 @@ def create_app(manager: SessionManager | None = None) -> FastAPI:
         )
 
     # --------------------------------------------------------- file routes
+    #
+    # File IO below is synchronous inside async handlers: it blocks the event
+    # loop for the duration of one read/write. Fine at workspace scale (text
+    # files, single user per session); revisit with anyio.to_thread if the
+    # workspace ever holds large files.
 
     def resolve(session: Session, path: str):
         try:
@@ -212,6 +226,8 @@ def create_app(manager: SessionManager | None = None) -> FastAPI:
             content = target.read_text()
         except UnicodeDecodeError:
             raise HTTPException(415, f"not a text file: {path}")
+        except OSError as e:
+            raise HTTPException(409, f"filesystem error: {e}")
         etag = _etag(content)
         return {"path": path, "content": content, "etag": etag}
 
@@ -225,16 +241,24 @@ def create_app(manager: SessionManager | None = None) -> FastAPI:
         target = resolve(session, path)
         if target.is_dir():
             raise HTTPException(409, f"is a directory: {path}")
-        if if_match is not None:
-            if not target.is_file():
-                raise HTTPException(409, "file no longer exists")
-            current = _etag(target.read_text())
-            if current != if_match:
-                # The agent (or another editor) changed the file since it was
-                # loaded; the frontend re-fetches and shows a conflict banner.
-                raise HTTPException(409, "file changed since it was loaded")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(body.content)
+        # Note: the etag check is atomic against the agent's file tools (same
+        # event loop, no await in between) but not against a concurrent
+        # run_command subprocess writing the same file.
+        try:
+            if if_match is not None:
+                if not target.is_file():
+                    raise HTTPException(409, "file no longer exists")
+                current = _etag(target.read_text())
+                if current != if_match:
+                    # The agent (or another editor) changed the file since it
+                    # was loaded; the frontend re-fetches and shows a conflict
+                    # banner.
+                    raise HTTPException(409, "file changed since it was loaded")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(body.content)
+        except OSError as e:
+            # e.g. a parent component is an existing file, or permissions
+            raise HTTPException(409, f"filesystem error: {e}")
         session.publish("fs_changed", paths=[path])
         return {"path": path, "etag": _etag(body.content)}
 
@@ -243,12 +267,15 @@ def create_app(manager: SessionManager | None = None) -> FastAPI:
         target = resolve(session, path)
         if target == session.workspace:
             raise HTTPException(400, "refusing to delete the workspace root")
-        if target.is_dir():
-            shutil.rmtree(target)
-        elif target.is_file():
-            target.unlink()
-        else:
-            raise HTTPException(404, f"no such file or directory: {path}")
+        try:
+            if target.is_dir():
+                shutil.rmtree(target)
+            elif target.is_file():
+                target.unlink()
+            else:
+                raise HTTPException(404, f"no such file or directory: {path}")
+        except OSError as e:
+            raise HTTPException(409, f"filesystem error: {e}")
         session.publish("fs_changed", paths=[path])
 
     return app

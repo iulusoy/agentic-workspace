@@ -51,6 +51,11 @@ UI (chat / directory tree / editor — full reference in [API.md](API.md)). Each
 session gets its own workspace directory, MCP connection, history, and
 user-supplied key (BYOK via `POST .../key`, never through chat messages).
 
+> **Warning:** sessions can run arbitrary shell commands (`run_command`) in
+> the server's context — run this service only inside the hardened container,
+> bound to localhost or behind TLS + a rate-limiting proxy. Details in
+> [API.md § Security model](API.md#security-model--read-before-deploying).
+
 ```bash
 pip install -e ".[server]"        # or [dev]
 uvicorn backend.api:create_app --factory --port 8100

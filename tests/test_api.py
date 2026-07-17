@@ -251,6 +251,22 @@ def test_file_path_confinement(client, session):
         assert response.status_code == 400, path
 
 
+def test_file_put_under_file_parent_is_409_not_500(client, session):
+    sid, headers, _ = session
+    url = f"{PREFIX}/sessions/{sid}/file"
+    assert (
+        client.put(
+            url, params={"path": "a.txt"}, headers=headers, json={"content": "x"}
+        ).status_code
+        == 200
+    )
+    response = client.put(
+        url, params={"path": "a.txt/b.txt"}, headers=headers, json={"content": "y"}
+    )
+    assert response.status_code == 409
+    assert "filesystem error" in response.json()["detail"]
+
+
 def test_file_delete(client, session):
     sid, headers, session_obj = session
     client.put(
