@@ -236,18 +236,17 @@ def _add_file_read_routes(router: APIRouter, session_dep) -> None:
         return {"path": path, "content": content, "etag": _etag(content)}
 
 
-def _check_if_match(target, if_match: str | None) -> None:
+def _check_if_match(target, if_match: str) -> None:
     """409 when the file changed (or vanished) since the editor loaded it.
 
     The check is atomic against the agent's file tools (same event loop, no
     await in between) but not against a concurrent run_command subprocess
     writing the same file.
     """
-    if if_match is None:
-        return
     if not target.is_file():
         raise HTTPException(409, "file no longer exists")
-    if _etag(target.read_text()) != if_match:
+    current = _etag(target.read_text())
+    if current != if_match:
         # The agent (or another editor) changed the file since it was loaded;
         # the frontend re-fetches and shows a conflict banner.
         raise HTTPException(409, "file changed since it was loaded")
@@ -284,7 +283,8 @@ def _add_file_put_route(router: APIRouter, session_dep) -> None:
         if target.is_dir():
             raise HTTPException(409, f"is a directory: {path}")
         try:
-            _check_if_match(target, if_match)
+            if if_match:
+                _check_if_match(target, if_match)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(body.content)
         except OSError as e:
