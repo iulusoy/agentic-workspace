@@ -127,7 +127,7 @@ class Session:
     def publish(self, event_type: str, **data) -> None:
         self._seq += 1
         event = {"seq": self._seq, "type": event_type, "data": data}
-        for queue in list(self.subscribers):
+        for queue in self.subscribers:
             # Bounded queue: a stalled SSE consumer must not grow memory for
             # the session's lifetime. SSE has no replay anyway, so the oldest
             # event is the cheapest one to drop.
@@ -176,13 +176,18 @@ class Session:
                     try:
                         await self.turn_task
                     except asyncio.CancelledError:
-                        # The turn was interrupted, not the actor; the turn
-                        # already rolled back history and emitted turn_error.
-                        pass
+                        # Swallow only a turn interrupt (the turn already
+                        # rolled back and emitted turn_error). If the actor
+                        # itself is being cancelled, the cancellation must
+                        # propagate.
+                        task = asyncio.current_task()
+                        if task is not None and task.cancelling():
+                            raise
                     finally:
                         self.turn_task = None
                         self.busy = False
-        except Exception as e:  # noqa: BLE001 — session becomes unusable, record why
+        except Exception as e:  # noqa: BLE001
+            # Broad by design: the session becomes unusable, record why.
             self.error = f"{type(e).__name__}: {e}"
             self.ready.set()
             # Unbrick clients: no turn will ever run again, so nothing may
@@ -213,64 +218,72 @@ class Session:
                 async with stream:
                     await self._emit_stream(stream)
                     message = await stream.get_final_message()
-                usage = message.usage
-                self.publish(
-                    "usage",
-                    input=usage.input_tokens,
-                    cache_read=usage.cache_read_input_tokens,
-                    cache_write=usage.cache_creation_input_tokens,
-                    output=usage.output_tokens,
-                )
+                self._publish_usage(message.usage)
                 self.history.append({"role": "assistant", "content": message.content})
-                names_by_id = {}
-                for block in message.content:
-                    if _block_get(block, "type") == "tool_use":
-                        names_by_id[_block_get(block, "id")] = _block_get(block, "name")
-                        self.publish(
-                            "tool_call",
-                            name=_block_get(block, "name"),
-                            args=_block_get(block, "input"),
-                        )
+                names_by_id = self._publish_tool_calls(message.content)
                 tool_response = await runner.generate_tool_call_response()
                 if tool_response is not None:
                     self.history.append(tool_response)
-                    for block in _block_get(tool_response, "content", []):
-                        if _block_get(block, "type") != "tool_result":
-                            continue
-                        text = _tool_result_text(_block_get(block, "content", ""))
-                        self.publish(
-                            "tool_result",
-                            name=names_by_id.get(_block_get(block, "tool_use_id")),
-                            is_error=bool(_block_get(block, "is_error", False)),
-                            chars=len(text),
-                            preview=text[:EVENT_PREVIEW_CHARS],
-                        )
+                    self._publish_tool_results(tool_response, names_by_id)
             # busy flips before the terminal event so that a client reacting
             # to turn_done can immediately POST the next message without 409.
             self.busy = False
             self.publish("turn_done", turn_id=turn_id)
         except asyncio.CancelledError:
-            del self.history[snapshot:]
-            self.busy = False
-            self.publish("turn_error", turn_id=turn_id, message="interrupted")
+            self._fail_turn(snapshot, turn_id, "interrupted")
             raise
         except anthropic.APIError as e:
             # Same rationale as the CLI: a partial turn can leave a tool_use
             # without its tool_result, which would 400 on every next request.
-            del self.history[snapshot:]
-            self.busy = False
-            self.publish("turn_error", turn_id=turn_id, message=str(e))
+            self._fail_turn(snapshot, turn_id, str(e))
         except Exception as e:  # noqa: BLE001
             # Any other failure is confined to this turn: same rollback, and
             # the session (and its MCP connection) stays usable. Without this
             # the exception would propagate into run_actor and kill the
             # session with a dangling user message in history.
-            del self.history[snapshot:]
-            self.busy = False
+            self._fail_turn(
+                snapshot, turn_id, f"internal error: {type(e).__name__}: {e}"
+            )
+
+    def _fail_turn(self, snapshot: int, turn_id: str, message: str) -> None:
+        """Roll the partial turn back and report it; the session stays usable."""
+        del self.history[snapshot:]
+        self.busy = False
+        self.publish("turn_error", turn_id=turn_id, message=message)
+
+    def _publish_usage(self, usage) -> None:
+        self.publish(
+            "usage",
+            input=usage.input_tokens,
+            cache_read=usage.cache_read_input_tokens,
+            cache_write=usage.cache_creation_input_tokens,
+            output=usage.output_tokens,
+        )
+
+    def _publish_tool_calls(self, content) -> dict:
+        """Emit tool_call events; map tool_use ids to names for the results."""
+        names_by_id = {}
+        for block in content:
+            if _block_get(block, "type") == "tool_use":
+                names_by_id[_block_get(block, "id")] = _block_get(block, "name")
+                self.publish(
+                    "tool_call",
+                    name=_block_get(block, "name"),
+                    args=_block_get(block, "input"),
+                )
+        return names_by_id
+
+    def _publish_tool_results(self, tool_response, names_by_id: dict) -> None:
+        for block in _block_get(tool_response, "content", []):
+            if _block_get(block, "type") != "tool_result":
+                continue
+            text = _tool_result_text(_block_get(block, "content", ""))
             self.publish(
-                "turn_error",
-                turn_id=turn_id,
-                message=f"internal error: {type(e).__name__}: {e}",
+                "tool_result",
+                name=names_by_id.get(_block_get(block, "tool_use_id")),
+                is_error=bool(_block_get(block, "is_error", False)),
+                chars=len(text),
+                preview=text[:EVENT_PREVIEW_CHARS],
             )
 
     async def _emit_stream(self, stream) -> None:

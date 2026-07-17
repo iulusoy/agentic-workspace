@@ -22,8 +22,9 @@ import secrets as pysecrets
 import shutil
 import uuid
 from contextlib import asynccontextmanager
+from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -33,6 +34,22 @@ from backend.service import Session, SessionManager, SessionStartupError
 # Seconds between SSE heartbeat comments (keeps proxies from closing the
 # stream while the agent is idle).
 HEARTBEAT_SECONDS = 15
+
+_ERROR_DESCRIPTIONS = {
+    400: "Invalid input: bad path, empty content, or missing key field",
+    401: "Unknown session or invalid session token",
+    404: "No such file or directory",
+    409: "Conflict: turn running, stale If-Match, filesystem error, "
+    "or nothing to interrupt",
+    415: "Not a text file",
+    428: "No API key set for this session yet",
+    502: "MCP server unreachable or the session's MCP connection died",
+}
+
+
+def _responses(*codes: int) -> dict:
+    """OpenAPI documentation for a route's error status codes."""
+    return {code: {"description": _ERROR_DESCRIPTIONS[code]} for code in codes}
 
 
 class KeyIn(BaseModel):
@@ -52,39 +69,15 @@ def _etag(text: str) -> str:
     return f'"{hashlib.sha256(text.encode()).hexdigest()[:32]}"'
 
 
-def create_app(manager: SessionManager | None = None) -> FastAPI:
-    mgr = manager if manager is not None else SessionManager()
+def _resolve(session: Session, path: str):
+    try:
+        return cl.resolve_in_root(path, session.workspace)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        yield
-        await mgr.shutdown()
 
-    app = FastAPI(title="BioCypher Agentic Workspace API", lifespan=lifespan)
-    app.state.manager = mgr
-    prefix = os.getenv("AGENT_API_PREFIX", "/agent/api/v1")
-
-    def session_auth(
-        session_id: str,
-        authorization: str | None = Header(None),
-        token: str | None = Query(None),
-    ) -> Session:
-        session = mgr.get(session_id)
-        supplied = token or ""
-        if not supplied and authorization and authorization.startswith("Bearer "):
-            supplied = authorization[len("Bearer ") :].strip()
-        # Same 401 for unknown id and bad token: don't leak which ids exist.
-        if (
-            session is None
-            or not supplied
-            or not pysecrets.compare_digest(supplied, session.token)
-        ):
-            raise HTTPException(401, "unknown session or invalid session token")
-        return session
-
-    # ------------------------------------------------------ session routes
-
-    @app.post(f"{prefix}/sessions", status_code=201)
+def _add_session_routes(router: APIRouter, mgr: SessionManager, session_dep) -> None:
+    @router.post("/sessions", status_code=201, responses=_responses(502))
     async def create_session():
         try:
             session = await mgr.create()
@@ -97,8 +90,8 @@ def create_app(manager: SessionManager | None = None) -> FastAPI:
             "tools": session.tool_defs,
         }
 
-    @app.get(f"{prefix}/sessions/{{session_id}}")
-    async def get_session(session: Session = Depends(session_auth)):
+    @router.get("/sessions/{session_id}", responses=_responses(401))
+    async def get_session(session: session_dep):
         return {
             "session_id": session.id,
             "model": cl.MODEL,
@@ -108,20 +101,28 @@ def create_app(manager: SessionManager | None = None) -> FastAPI:
             "tools": session.tool_defs,
         }
 
-    @app.delete(f"{prefix}/sessions/{{session_id}}", status_code=204)
-    async def delete_session(session: Session = Depends(session_auth)):
+    @router.delete("/sessions/{session_id}", status_code=204, responses=_responses(401))
+    async def delete_session(session: session_dep):
         await mgr.delete(session.id)
 
-    @app.post(f"{prefix}/sessions/{{session_id}}/key", status_code=204)
-    async def set_key(body: KeyIn, session: Session = Depends(session_auth)):
+    @router.post(
+        "/sessions/{session_id}/key",
+        status_code=204,
+        responses=_responses(400, 401),
+    )
+    async def set_key(body: KeyIn, session: session_dep):
         if not body.api_key and not body.auth_token:
             raise HTTPException(400, "provide api_key or auth_token")
         session.set_key(body.api_key, body.auth_token)
 
-    # --------------------------------------------------------- chat routes
 
-    @app.post(f"{prefix}/sessions/{{session_id}}/messages", status_code=202)
-    async def post_message(body: MessageIn, session: Session = Depends(session_auth)):
+def _add_chat_routes(router: APIRouter, session_dep) -> None:
+    @router.post(
+        "/sessions/{session_id}/messages",
+        status_code=202,
+        responses=_responses(400, 401, 409, 428, 502),
+    )
+    async def post_message(body: MessageIn, session: session_dep):
         if session.error:
             raise HTTPException(502, f"session is unusable: {session.error}")
         if not session.has_key:
@@ -137,14 +138,20 @@ def create_app(manager: SessionManager | None = None) -> FastAPI:
         session.inbox.put_nowait((turn_id, body.content))
         return {"turn_id": turn_id}
 
-    @app.post(f"{prefix}/sessions/{{session_id}}/interrupt", status_code=202)
-    async def interrupt(session: Session = Depends(session_auth)):
+    @router.post(
+        "/sessions/{session_id}/interrupt",
+        status_code=202,
+        responses=_responses(401, 409),
+    )
+    async def interrupt(session: session_dep):
         if not session.interrupt():
             raise HTTPException(409, "no turn is running")
         return {"status": "interrupting"}
 
-    @app.get(f"{prefix}/sessions/{{session_id}}/events")
-    async def events(session: Session = Depends(session_auth)):
+
+def _add_event_routes(router: APIRouter, mgr: SessionManager, session_dep) -> None:
+    @router.get("/sessions/{session_id}/events", responses=_responses(401))
+    async def events(session: session_dep):
         queue = session.subscribe()
 
         async def stream():
@@ -186,22 +193,17 @@ def create_app(manager: SessionManager | None = None) -> FastAPI:
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )
 
-    # --------------------------------------------------------- file routes
-    #
-    # File IO below is synchronous inside async handlers: it blocks the event
-    # loop for the duration of one read/write. Fine at workspace scale (text
-    # files, single user per session); revisit with anyio.to_thread if the
-    # workspace ever holds large files.
 
-    def resolve(session: Session, path: str):
-        try:
-            return cl.resolve_in_root(path, session.workspace)
-        except ValueError as e:
-            raise HTTPException(400, str(e))
+# File IO in the routes below is synchronous inside async handlers: it blocks
+# the event loop for the duration of one read/write. Fine at workspace scale
+# (text files, single user per session); revisit with anyio.to_thread if the
+# workspace ever holds large files.
 
-    @app.get(f"{prefix}/sessions/{{session_id}}/files")
-    async def list_files(path: str = "", session: Session = Depends(session_auth)):
-        target = resolve(session, path or ".")
+
+def _add_file_read_routes(router: APIRouter, session_dep) -> None:
+    @router.get("/sessions/{session_id}/files", responses=_responses(400, 401, 404))
+    async def list_files(session: session_dep, path: str = ""):
+        target = _resolve(session, path or ".")
         if not target.is_dir():
             raise HTTPException(404, f"no such directory: {path}")
         entries = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name))
@@ -217,9 +219,12 @@ def create_app(manager: SessionManager | None = None) -> FastAPI:
             ],
         }
 
-    @app.get(f"{prefix}/sessions/{{session_id}}/file")
-    async def read_file(path: str, session: Session = Depends(session_auth)):
-        target = resolve(session, path)
+    @router.get(
+        "/sessions/{session_id}/file",
+        responses=_responses(400, 401, 404, 409, 415),
+    )
+    async def read_file(path: str, session: session_dep):
+        target = _resolve(session, path)
         if not target.is_file():
             raise HTTPException(404, f"no such file: {path}")
         try:
@@ -228,17 +233,18 @@ def create_app(manager: SessionManager | None = None) -> FastAPI:
             raise HTTPException(415, f"not a text file: {path}")
         except OSError as e:
             raise HTTPException(409, f"filesystem error: {e}")
-        etag = _etag(content)
-        return {"path": path, "content": content, "etag": etag}
+        return {"path": path, "content": content, "etag": _etag(content)}
 
-    @app.put(f"{prefix}/sessions/{{session_id}}/file")
+
+def _add_file_write_routes(router: APIRouter, session_dep) -> None:
+    @router.put("/sessions/{session_id}/file", responses=_responses(400, 401, 409))
     async def write_file(
         path: str,
         body: FileIn,
-        session: Session = Depends(session_auth),
-        if_match: str | None = Header(None),
+        session: session_dep,
+        if_match: Annotated[str | None, Header()] = None,
     ):
-        target = resolve(session, path)
+        target = _resolve(session, path)
         if target.is_dir():
             raise HTTPException(409, f"is a directory: {path}")
         # Note: the etag check is atomic against the agent's file tools (same
@@ -262,9 +268,13 @@ def create_app(manager: SessionManager | None = None) -> FastAPI:
         session.publish("fs_changed", paths=[path])
         return {"path": path, "etag": _etag(body.content)}
 
-    @app.delete(f"{prefix}/sessions/{{session_id}}/file", status_code=204)
-    async def delete_file(path: str, session: Session = Depends(session_auth)):
-        target = resolve(session, path)
+    @router.delete(
+        "/sessions/{session_id}/file",
+        status_code=204,
+        responses=_responses(400, 401, 404, 409),
+    )
+    async def delete_file(path: str, session: session_dep):
+        target = _resolve(session, path)
         if target == session.workspace:
             raise HTTPException(400, "refusing to delete the workspace root")
         try:
@@ -278,6 +288,51 @@ def create_app(manager: SessionManager | None = None) -> FastAPI:
             raise HTTPException(409, f"filesystem error: {e}")
         session.publish("fs_changed", paths=[path])
 
+
+def _build_router(mgr: SessionManager) -> APIRouter:
+    router = APIRouter()
+
+    def session_auth(
+        session_id: str,
+        authorization: Annotated[str | None, Header()] = None,
+        token: Annotated[str | None, Query()] = None,
+    ) -> Session:
+        session = mgr.get(session_id)
+        supplied = token or ""
+        if not supplied and authorization and authorization.startswith("Bearer "):
+            supplied = authorization[len("Bearer ") :].strip()
+        # Same 401 for unknown id and bad token: don't leak which ids exist.
+        if (
+            session is None
+            or not supplied
+            or not pysecrets.compare_digest(supplied, session.token)
+        ):
+            raise HTTPException(401, "unknown session or invalid session token")
+        return session
+
+    session_dep = Annotated[Session, Depends(session_auth)]
+
+    _add_session_routes(router, mgr, session_dep)
+    _add_chat_routes(router, session_dep)
+    _add_event_routes(router, mgr, session_dep)
+    _add_file_read_routes(router, session_dep)
+    _add_file_write_routes(router, session_dep)
+    return router
+
+
+def create_app(manager: SessionManager | None = None) -> FastAPI:
+    mgr = manager if manager is not None else SessionManager()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        await mgr.shutdown()
+
+    app = FastAPI(title="BioCypher Agentic Workspace API", lifespan=lifespan)
+    app.state.manager = mgr
+    app.include_router(
+        _build_router(mgr), prefix=os.getenv("AGENT_API_PREFIX", "/agent/api/v1")
+    )
     return app
 
 

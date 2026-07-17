@@ -29,7 +29,9 @@ running, open:
 - `http://127.0.0.1:8100/openapi.json` — raw OpenAPI schema
 
 The docs pages live at the app root, not under the `/agent/api/v1` prefix —
-the prefix is part of each route's path, not a mount point.
+the prefix is part of each route's path, not a mount point. Each route's
+error status codes (401/409/428/…) are documented in the generated schema
+and match the tables in this file.
 
 Two caveats when trying routes out in Swagger UI:
 
