@@ -245,7 +245,10 @@ def _check_if_match(target, if_match: str) -> None:
     """
     if not target.is_file():
         raise HTTPException(409, "file no longer exists")
-    current = _etag(target.read_text())
+    try:
+        current = _etag(target.read_text())
+    except UnicodeDecodeError:
+        raise HTTPException(415, "not a text file")
     if current != if_match:
         # The agent (or another editor) changed the file since it was loaded;
         # the frontend re-fetches and shows a conflict banner.
