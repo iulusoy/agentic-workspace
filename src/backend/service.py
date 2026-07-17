@@ -127,7 +127,7 @@ class Session:
     def publish(self, event_type: str, **data) -> None:
         self._seq += 1
         event = {"seq": self._seq, "type": event_type, "data": data}
-        for queue in self.subscribers:
+        for queue in tuple(self.subscribers):
             # Bounded queue: a stalled SSE consumer must not grow memory for
             # the session's lifetime. SSE has no replay anyway, so the oldest
             # event is the cheapest one to drop.
