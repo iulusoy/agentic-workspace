@@ -412,7 +412,12 @@ async function loadDir(path) {
     renderCrumb(path);
     renderTree(data.entries);
   } catch (e) {
-    $("tree").innerHTML = `<div class="empty">${e.message}</div>`;
+    const div = document.createElement("div");
+    div.className = "empty";
+    div.textContent = e.message;
+    const tree = $("tree");
+    tree.innerHTML = "";
+    tree.appendChild(div);
   }
 }
 
