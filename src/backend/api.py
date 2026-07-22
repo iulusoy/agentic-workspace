@@ -22,10 +22,12 @@ import secrets as pysecrets
 import shutil
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from backend import client_loop as cl
@@ -364,6 +366,12 @@ def create_app(manager: SessionManager | None = None) -> FastAPI:
     app.include_router(
         _build_router(mgr), prefix=os.getenv("AGENT_API_PREFIX", "/agent/api/v1")
     )
+    # Dev-only demo frontend (PLAN.md 3.8): mounted only when the source
+    # checkout has demo/ next to it, so it never appears in the built image
+    # (demo/ is in .dockerignore). Not part of the shipped API surface.
+    demo_dir = Path(__file__).resolve().parents[2] / "demo"
+    if demo_dir.is_dir():
+        app.mount("/demo", StaticFiles(directory=demo_dir, html=True), name="demo")
     return app
 
 

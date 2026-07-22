@@ -72,6 +72,9 @@ can sit behind the registry's nginx unchanged. Extra env vars:
 `usage`, `fs_changed`, `turn_done`); file endpoints use `ETag`/`If-Match` for
 editor-vs-agent conflict detection.
 
+**Demo frontend** (`demo/index.html`, dev-only, no build step): with the server above running, open `http://127.0.0.1:8100/demo/` for
+a minimal three-pane UI (chat/tree/editor) exercising the whole API. Not
+shipped in the container image (`demo/` is in `.dockerignore`).
 ### Using docker-compose
 
 Place your Anthropic API key inside `secrets/anthropic_api_key` (no quotes;
