@@ -6,6 +6,7 @@ __pycache__
 adapter
 adapter2
 tests
+demo
 dist
 build
 secrets

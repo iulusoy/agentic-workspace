@@ -1,0 +1,525 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>agentic-workspace demo</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 14px/1.4 -apple-system, Segoe UI, Roboto, sans-serif;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+    border-bottom: 1px solid #8884; flex-wrap: wrap;
+  }
+  header b { margin-right: 4px; }
+  header input[type=text], header input[type=password] {
+    font: inherit; padding: 3px 6px; width: 13em;
+  }
+  header button { font: inherit; padding: 3px 10px; cursor: pointer; }
+  header button:disabled { cursor: default; opacity: .5; }
+  #status { font-size: 12px; opacity: .75; }
+  #banner {
+    padding: 6px 12px; background: #d9534f; color: #fff; display: none;
+  }
+  main {
+    flex: 1; display: grid; grid-template-columns: 280px 1fr 1fr;
+    min-height: 0;
+  }
+  .pane {
+    display: flex; flex-direction: column; min-height: 0;
+    border-right: 1px solid #8884;
+  }
+  .pane:last-child { border-right: none; }
+  .pane h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+    opacity: .6; margin: 0; padding: 6px 10px; border-bottom: 1px solid #8884;
+  }
+  .pane-body { flex: 1; overflow: auto; padding: 8px 10px; }
+
+  /* tree */
+  #crumb { font-size: 12px; opacity: .7; margin-bottom: 6px; }
+  #crumb span { cursor: pointer; text-decoration: underline; }
+  .row {
+    display: flex; align-items: center; gap: 6px; padding: 3px 2px;
+    cursor: pointer; border-radius: 3px;
+  }
+  .row:hover { background: #8882; }
+  .row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .del { opacity: .4; cursor: pointer; padding: 0 4px; }
+  .row .del:hover { opacity: 1; color: #d9534f; }
+
+  /* chat */
+  #messages { display: flex; flex-direction: column; gap: 10px; }
+  .msg { padding: 6px 8px; border-radius: 6px; }
+  .msg.user { background: #3b82f622; align-self: flex-end; max-width: 90%; }
+  .msg.assistant { background: #8883; }
+  .msg .thinking { opacity: .5; font-style: italic; }
+  .msg pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-family: inherit; }
+  details.chip {
+    margin-top: 4px; font-size: 12px; border: 1px solid #8886; border-radius: 4px;
+    padding: 3px 6px; background: #8881;
+  }
+  details.chip[open] { padding-bottom: 6px; }
+  details.chip.err { border-color: #d9534f; }
+  details.chip summary { cursor: pointer; }
+  details.chip pre { font-size: 11px; margin-top: 4px; max-height: 200px; overflow: auto; }
+  #chatform { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid #8884; }
+  #chatform textarea {
+    flex: 1; resize: none; font: inherit; padding: 6px; height: 2.6em;
+  }
+  #usage { font-size: 11px; opacity: .6; padding: 0 10px 6px; }
+
+  /* editor */
+  #editorpath { font-size: 12px; opacity: .7; padding: 0 0 6px; word-break: break-all; }
+  #editorbody { flex: 1; display: flex; flex-direction: column; padding: 8px 10px; min-height: 0; }
+  #filecontent {
+    flex: 1; font-family: ui-monospace, monospace; font-size: 12.5px;
+    resize: none; padding: 6px; width: 100%;
+  }
+  #editortools { display: flex; gap: 6px; margin-top: 6px; }
+  #conflict {
+    display: none; background: #d9534f22; border: 1px solid #d9534f; padding: 6px;
+    margin-bottom: 6px; border-radius: 4px; font-size: 12px;
+  }
+  #conflict button { margin-left: 8px; }
+  .empty { opacity: .5; font-style: italic; padding: 4px 2px; }
+</style>
+</head>
+<body>
+
+<header>
+  <b>agentic-workspace demo</b>
+  <label>API prefix <input id="apiPrefix" type="text" value="/agent/api/v1"></label>
+  <button id="btnCreate">Create session</button>
+  <input id="apiKey" type="password" placeholder="Anthropic API key (sk-ant-...)" style="display:none">
+  <button id="btnSetKey" style="display:none">Set key</button>
+  <span id="status">no session</span>
+</header>
+<div id="banner"></div>
+
+<main>
+  <section class="pane" id="treepane">
+    <h2>Directory</h2>
+    <div class="pane-body">
+      <div id="crumb"></div>
+      <div id="tree"><div class="empty">no session yet</div></div>
+    </div>
+  </section>
+
+  <section class="pane" id="chatpane">
+    <h2>Chat</h2>
+    <div class="pane-body"><div id="messages"></div></div>
+    <div id="usage"></div>
+    <form id="chatform">
+      <textarea id="chatinput" placeholder="ask the agent..." disabled></textarea>
+      <button id="btnSend" type="submit" disabled>Send</button>
+      <button id="btnInterrupt" type="button" disabled>Stop</button>
+    </form>
+  </section>
+
+  <section class="pane" id="editorpane">
+    <h2>File editor</h2>
+    <div id="editorbody">
+      <div id="conflict"></div>
+      <div id="editorpath">no file open</div>
+      <textarea id="filecontent" placeholder="open a file from the tree" disabled></textarea>
+      <div id="editortools">
+        <button id="btnSave" disabled>Save</button>
+        <span id="savestatus" style="font-size:12px;opacity:.6"></span>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+// ---- state -----------------------------------------------------------
+const state = {
+  sessionId: null,
+  token: null,
+  busy: false,
+  hasKey: false,
+  treePath: "",
+  file: { path: null, etag: null },
+  reader: null,
+};
+
+const $ = (id) => document.getElementById(id);
+const prefix = () => $("apiPrefix").value.replace(/\/$/, "");
+const sessUrl = (rest = "") => `/sessions/${state.sessionId}${rest}`;
+const authHeaders = (extra = {}) =>
+  Object.assign({ Authorization: `Bearer ${state.token}` }, extra);
+
+function setStatus(text) { $("status").textContent = text; }
+function banner(msg) {
+  const b = $("banner");
+  if (!msg) { b.style.display = "none"; return; }
+  b.textContent = msg;
+  b.style.display = "block";
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(`${prefix()}${path}`, {
+    ...opts,
+    headers: authHeaders(opts.headers || {}),
+  });
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.json()).detail || ""; } catch { /* not json */ }
+    const err = new Error(detail || `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return res;
+}
+
+// ---- session lifecycle -------------------------------------------------
+
+$("btnCreate").onclick = async () => {
+  $("btnCreate").disabled = true;
+  banner(null);
+  try {
+    const res = await fetch(`${prefix()}/sessions`, { method: "POST" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    state.sessionId = data.session_id;
+    state.token = data.session_token;
+    setStatus(`session ${data.session_id.slice(0, 8)} · model ${data.model}`);
+    $("apiKey").style.display = "";
+    $("btnSetKey").style.display = "";
+    startEvents();
+    loadDir("");
+  } catch (e) {
+    banner(`could not create session: ${e.message}`);
+  } finally {
+    $("btnCreate").disabled = false;
+  }
+};
+
+$("btnSetKey").onclick = async () => {
+  const key = $("apiKey").value.trim();
+  if (!key) return;
+  try {
+    await api(sessUrl("/key"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: key }),
+    });
+    $("apiKey").value = "";
+    state.hasKey = true;
+    updateChatEnabled();
+    setStatus(`session ${state.sessionId.slice(0, 8)} · key set`);
+  } catch (e) {
+    banner(`could not set key: ${e.message}`);
+  }
+};
+
+// ---- SSE (fetch + ReadableStream: EventSource can't send Authorization) -
+
+async function startEvents() {
+  const res = await fetch(`${prefix()}${sessUrl("/events")}`, { headers: authHeaders() });
+  if (!res.ok || !res.body) {
+    banner(`could not open event stream: HTTP ${res.status}`);
+    return;
+  }
+  const reader = res.body.getReader();
+  state.reader = reader;
+  const decoder = new TextDecoder();
+  let buf = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) !== -1) {
+        const block = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        handleSSEBlock(block);
+      }
+    }
+  } catch (e) {
+    banner(`event stream error: ${e.message}`);
+  }
+}
+
+function handleSSEBlock(block) {
+  let event = "message";
+  let data = "";
+  for (const line of block.split("\n")) {
+    if (line.startsWith(":")) continue; // heartbeat comment
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) data += line.slice(5).trim();
+  }
+  if (!data) return;
+  let payload;
+  try { payload = JSON.parse(data); } catch { return; }
+  onEvent(event, payload);
+}
+
+function onEvent(type, data) {
+  switch (type) {
+    case "session_state":
+      state.busy = data.busy; state.hasKey = data.has_key;
+      if (data.error) banner(`session error: ${data.error}`);
+      updateChatEnabled();
+      break;
+    case "session_error":
+      banner(`session error: ${data.message}`);
+      state.busy = false; updateChatEnabled();
+      break;
+    case "session_closed":
+      banner("session closed");
+      state.busy = false; updateChatEnabled();
+      break;
+    case "turn_started":
+      state.busy = true; updateChatEnabled();
+      beginAssistantMessage();
+      break;
+    case "thinking_started":
+      currentAssistantEl().querySelector(".thinking").style.display = "";
+      break;
+    case "text_delta":
+      appendAssistantText(data.text);
+      break;
+    case "tool_call":
+      addChip(`→ ${data.name}`, JSON.stringify(data.args, null, 2), false);
+      break;
+    case "tool_result":
+      addChip(
+        `← ${data.name}${data.is_error ? " (error)" : ""} · ${data.chars} chars`,
+        data.preview, data.is_error
+      );
+      break;
+    case "usage":
+      $("usage").textContent =
+        `in ${data.input} · cache_read ${data.cache_read} · cache_write ${data.cache_write} · out ${data.output}`;
+      break;
+    case "fs_changed":
+      loadDir(state.treePath);
+      if (state.file.path && data.paths.includes(state.file.path)) {
+        showConflict("file changed on disk (agent or another tab).");
+      }
+      break;
+    case "turn_done":
+      state.busy = false; updateChatEnabled();
+      break;
+    case "turn_error":
+      state.busy = false; updateChatEnabled();
+      addSystemNote(`turn failed: ${data.message}`);
+      break;
+  }
+}
+
+function updateChatEnabled() {
+  const ready = !!state.sessionId && state.hasKey && !state.busy;
+  $("chatinput").disabled = !ready;
+  $("btnSend").disabled = !ready;
+  $("btnInterrupt").disabled = !state.busy;
+}
+
+// ---- chat --------------------------------------------------------------
+
+let currentAssistant = null;
+
+function beginAssistantMessage() {
+  const div = document.createElement("div");
+  div.className = "msg assistant";
+  div.innerHTML = `<div class="thinking" style="display:none">[thinking...]</div><pre class="text"></pre>`;
+  $("messages").appendChild(div);
+  currentAssistant = div;
+  div.scrollIntoView({ block: "end" });
+}
+function currentAssistantEl() {
+  if (!currentAssistant) beginAssistantMessage();
+  return currentAssistant;
+}
+function appendAssistantText(text) {
+  const el = currentAssistantEl();
+  el.querySelector(".thinking").style.display = "none";
+  el.querySelector(".text").textContent += text;
+  el.scrollIntoView({ block: "end" });
+}
+function addChip(summary, body, isError) {
+  const el = currentAssistantEl();
+  const d = document.createElement("details");
+  d.className = "chip" + (isError ? " err" : "");
+  d.innerHTML = `<summary></summary><pre></pre>`;
+  d.querySelector("summary").textContent = summary;
+  d.querySelector("pre").textContent = body || "";
+  el.appendChild(d);
+  el.scrollIntoView({ block: "end" });
+}
+function addSystemNote(text) {
+  const div = document.createElement("div");
+  div.className = "msg";
+  div.style.opacity = ".7";
+  div.textContent = text;
+  $("messages").appendChild(div);
+  div.scrollIntoView({ block: "end" });
+}
+
+// Reject anything that looks like an API key pasted into chat, client-side.
+// (This is a UX guard only; PLAN.md 3.5 calls for the same check server-side
+// too, which is not yet implemented in backend/api.py as of this demo.)
+const KEY_LIKE = /sk-ant-[A-Za-z0-9_-]{10,}/;
+
+$("chatform").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const input = $("chatinput");
+  const content = input.value.trim();
+  if (!content) return;
+  if (KEY_LIKE.test(content)) {
+    banner("that looks like an API key — use the key field above, not the chat box.");
+    return;
+  }
+  const div = document.createElement("div");
+  div.className = "msg user";
+  div.innerHTML = `<pre></pre>`;
+  div.querySelector("pre").textContent = content;
+  $("messages").appendChild(div);
+  div.scrollIntoView({ block: "end" });
+  input.value = "";
+  currentAssistant = null;
+  try {
+    await api(sessUrl("/messages"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    });
+  } catch (e) {
+    addSystemNote(`send failed: ${e.message}`);
+  }
+};
+
+$("btnInterrupt").onclick = async () => {
+  try { await api(sessUrl("/interrupt"), { method: "POST" }); }
+  catch (e) { addSystemNote(`interrupt failed: ${e.message}`); }
+};
+
+// ---- directory tree ------------------------------------------------------
+
+async function loadDir(path) {
+  if (!state.sessionId) return;
+  state.treePath = path;
+  try {
+    const res = await api(sessUrl(`/files?path=${encodeURIComponent(path)}`));
+    const data = await res.json();
+    renderCrumb(path);
+    renderTree(data.entries);
+  } catch (e) {
+    $("tree").innerHTML = `<div class="empty">${e.message}</div>`;
+  }
+}
+
+function renderCrumb(path) {
+  const parts = path ? path.split("/") : [];
+  const crumb = $("crumb");
+  crumb.innerHTML = "";
+  const root = document.createElement("span");
+  root.textContent = "/workspace";
+  root.onclick = () => loadDir("");
+  crumb.appendChild(root);
+  let acc = "";
+  for (const part of parts) {
+    acc = acc ? `${acc}/${part}` : part;
+    crumb.append(" / ");
+    const s = document.createElement("span");
+    s.textContent = part;
+    const target = acc;
+    s.onclick = () => loadDir(target);
+    crumb.appendChild(s);
+  }
+}
+
+function renderTree(entries) {
+  const tree = $("tree");
+  tree.innerHTML = "";
+  if (!entries.length) {
+    tree.innerHTML = `<div class="empty">empty directory</div>`;
+    return;
+  }
+  for (const e of entries) {
+    const row = document.createElement("div");
+    row.className = "row";
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = (e.is_dir ? "📁 " : "📄 ") + e.name;
+    row.appendChild(name);
+    row.onclick = () => (e.is_dir ? loadDir(e.path) : openFile(e.path));
+
+    const del = document.createElement("span");
+    del.className = "del";
+    del.textContent = "✕";
+    del.title = "delete";
+    del.onclick = async (ev) => {
+      ev.stopPropagation();
+      if (!confirm(`delete ${e.path}?`)) return;
+      try {
+        await api(sessUrl(`/file?path=${encodeURIComponent(e.path)}`), { method: "DELETE" });
+        loadDir(state.treePath);
+      } catch (err) { banner(`delete failed: ${err.message}`); }
+    };
+    row.appendChild(del);
+    tree.appendChild(row);
+  }
+}
+
+// ---- file editor -----------------------------------------------------
+
+async function openFile(path) {
+  try {
+    const res = await api(sessUrl(`/file?path=${encodeURIComponent(path)}`));
+    const data = await res.json();
+    state.file = { path: data.path, etag: data.etag };
+    $("editorpath").textContent = data.path;
+    $("filecontent").value = data.content;
+    $("filecontent").disabled = false;
+    $("btnSave").disabled = false;
+    showConflict(null);
+    $("savestatus").textContent = "";
+  } catch (e) {
+    banner(`could not open file: ${e.message}`);
+  }
+}
+
+function showConflict(msg) {
+  const c = $("conflict");
+  if (!msg) { c.style.display = "none"; c.innerHTML = ""; return; }
+  c.style.display = "block";
+  c.innerHTML = "";
+  c.append(msg + " ");
+  const btn = document.createElement("button");
+  btn.textContent = "Reload (discard my edits)";
+  btn.onclick = () => openFile(state.file.path);
+  c.appendChild(btn);
+}
+
+$("btnSave").onclick = async () => {
+  if (!state.file.path) return;
+  $("savestatus").textContent = "saving...";
+  try {
+    const res = await api(sessUrl(`/file?path=${encodeURIComponent(state.file.path)}`), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "If-Match": state.file.etag },
+      body: JSON.stringify({ content: $("filecontent").value }),
+    });
+    const data = await res.json();
+    state.file.etag = data.etag;
+    $("savestatus").textContent = `saved ${new Date().toLocaleTimeString()}`;
+  } catch (e) {
+    if (e.status === 409) {
+      showConflict("save conflict: file changed on disk since it was loaded.");
+      $("savestatus").textContent = "";
+    } else {
+      banner(`save failed: ${e.message}`);
+    }
+  }
+};
+</script>
+</body>
+</html>
