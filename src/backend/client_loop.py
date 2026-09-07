@@ -383,7 +383,7 @@ def make_file_tools(
                 out, _ = await asyncio.wait_for(
                     proc.communicate(), timeout=timeout_seconds
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 proc.kill()
                 await proc.wait()
                 return f"[tool error] command timed out after {timeout_seconds}s"
