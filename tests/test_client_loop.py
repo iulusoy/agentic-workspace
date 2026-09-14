@@ -4,9 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-
 from conftest import run
-
 
 # ---------------------------------------------------------------- config
 
