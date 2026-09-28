@@ -3,9 +3,8 @@
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
-import httpx
-
 import anthropic
+import httpx
 
 
 class FakeMcp:
