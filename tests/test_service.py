@@ -3,8 +3,6 @@
 import asyncio
 
 import pytest
-
-from backend.service import SessionManager, SessionStartupError
 from fakes import (
     FakeRunner,
     FakeStream,
@@ -13,6 +11,8 @@ from fakes import (
     final_message,
     text_event,
 )
+
+from backend.service import SessionManager, SessionStartupError
 
 
 def make_manager(tmp_path, mcp_connect=fake_mcp_connect):
