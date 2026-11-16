@@ -349,7 +349,7 @@ class SessionManager:
         session.actor = asyncio.create_task(session.run_actor())
         try:
             await asyncio.wait_for(session.ready.wait(), timeout=READY_TIMEOUT)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             session.error = f"MCP connection timed out after {READY_TIMEOUT}s"
         if session.error:
             await self._teardown(session)
