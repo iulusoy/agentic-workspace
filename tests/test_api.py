@@ -4,10 +4,6 @@ import time
 from types import SimpleNamespace
 
 import pytest
-from fastapi.testclient import TestClient
-
-from backend.api import create_app
-from backend.service import SessionManager
 from fakes import (
     FakeRunner,
     FakeStream,
@@ -16,6 +12,10 @@ from fakes import (
     final_message,
     text_event,
 )
+from fastapi.testclient import TestClient
+
+from backend.api import create_app
+from backend.service import SessionManager
 
 PREFIX = "/agent/api/v1"
 
